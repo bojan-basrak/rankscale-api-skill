@@ -41,6 +41,13 @@ it'll follow the instructions there.
 - **Workspace management** — list / create / edit brands, topics, and search terms (writes always ask for confirmation)
 - **Credits** — balance and runway estimate
 
+## Usage examples
+
+A worked walkthrough of the skill in action — real questions and the tables it
+produces — is here:
+**[Rankscale skill examples](https://bojan-basrak.github.io/rankscale-webinar-2026-07-16/index.html)**
+(from a July 2026 webinar).
+
 ## Requirements
 
 - An agentic coding tool that can read a skill file and run shell commands (see the list above).
@@ -79,6 +86,13 @@ setx RANKSCALE_API_KEY "rk_your_key_here"
 | [`references/endpoints.md`](references/endpoints.md) | Full endpoint inventory, request shapes, engine catalog, error codes |
 | [`references/quirks.md`](references/quirks.md) | API behaviors that affect how numbers should be interpreted |
 | [`INSTALL.md`](INSTALL.md) | Setup guide |
+
+## Limitations
+
+- **Paid plans only.** REST API access is available on Rankscale's Agency Growth and Enterprise plans. If you don't have an `rk_` key, the skill can't do anything — ask the Rankscale team to enable it.
+- **The API may change without notice.** The official docs aren't public yet, so this skill was built from hands-on probing. Endpoints, field names, and behaviors can shift; if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
+- **No live validation here.** Nothing in this repo is tested against your account. Always sanity-check that returned time windows and numbers match what you asked for before trusting a report.
+- **Rate limits apply.** 200 requests/min per key; the skill caches and batches, but heavy ad-hoc use can hit the ceiling.
 
 ## Security
 
