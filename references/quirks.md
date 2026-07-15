@@ -31,7 +31,7 @@ The daily historical data also includes a `brandNotFound[]` parallel array of bo
 
 ## 3. Aliases drive matching
 
-Each brand carries a `brandInfo.names[]` array of aliases (e.g. Dashmoto matches *"Dash Moto", "Dashmoto Dash 3 High-Speed Scooter", "dashmoto.co"*). When the user refers to a brand, search both the canonical `name` and `brandInfo.names[]` for matches. Missing aliases is the most common cause of low detection rates.
+Each brand carries a `brandInfo.names[]` array of aliases (e.g. a brand "Acme" might match *"Acme Inc", "Acme Corp", "acme.com"*). When the user refers to a brand, search both the canonical `name` and `brandInfo.names[]` for matches. Missing aliases is the most common cause of low detection rates.
 
 ## 4. Snapshot metrics ≠ sum of daily metrics
 

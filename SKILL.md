@@ -1,6 +1,6 @@
 ---
-name: rankscale
-description: Query the Rankscale AI brand-visibility API — list brands, pull reporting metrics (visibility, sentiment, citations, search terms), check credits, and manage workspace items (brands, topics, search terms). Use this whenever the user mentions Rankscale, RS, brand visibility tracking, AI brand mentions, GEO/AEO analytics, or asks about how a brand they track appears in AI assistant responses. Trigger even if they don't name the API explicitly — phrases like "how is Dashmoto doing this week", "show me citations for brand X", "what's my credit balance", "list my tracked brands", "add a search term", or "run a search term" all warrant this skill.
+name: rankscale-api-skill
+description: Query the Rankscale AI brand-visibility API — list brands, pull reporting metrics (visibility, sentiment, citations, search terms), check credits, and manage workspace items (brands, topics, search terms). Use this whenever the user mentions Rankscale, RS, brand visibility tracking, AI brand mentions, GEO/AEO analytics, or asks about how a brand they track appears in AI assistant responses. Trigger even if they don't name the API explicitly — phrases like "how is my brand doing this week", "show me citations for brand X", "what's my credit balance", "list my tracked brands", "add a search term", or "run a search term" all warrant this skill.
 ---
 
 # Rankscale REST API
@@ -15,7 +15,7 @@ This skill calls the REST API directly so the user (an SEO professional, not a d
 - **Base URL**: `https://rankscale.ai` (note: no `/api` prefix — the path is `/v1/...` directly on the marketing domain).
 - **Auth header**: `Authorization: Bearer $RANKSCALE_API_KEY`.
 - **Rate limit**: 200 requests per minute per API key. The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` (seconds until window resets) — read them with `curl -i` if you're doing batch work. Cache reporting responses for 5–10 min when possible.
-- **Tools available**: `curl` and `node` (v24+). Python is not on PATH — don't reach for `python -m json.tool`. Use `node -e "..."` for JSON parsing.
+- **Tools available**: `curl` for requests. For JSON parsing, use whatever the environment provides — `node -e "..."`, `jq`, or `python -m json.tool`. Check what's on PATH before assuming; don't hard-depend on any one of them.
 - **Shell syntax**: examples below use bash-style variable expansion (`$RANKSCALE_API_KEY`). On Windows PowerShell that becomes `$env:RANKSCALE_API_KEY`. Pick whichever shell tool you call — both work, but mind the syntax.
 
 ## Calling pattern
@@ -60,7 +60,7 @@ The complete endpoint inventory and request shapes live in `references/endpoints
 
 ### 1. Identify the brand
 
-Most reporting endpoints need a `brandId`. When the user names a brand ("show me Dashmoto's metrics"), resolve the ID first:
+Most reporting endpoints need a `brandId`. When the user names a brand ("show me Acme's metrics"), resolve the ID first:
 
 1. If `Rankscale/brands.json` exists in the user's working directory, read it.
 2. Otherwise call `GET /v1/metrics/brands` and save the result.
@@ -134,7 +134,7 @@ Key fields: `data.totalCitations`, `data.uniqueDomains`, and `data.citationsByDo
 
 ## Workspace writes — confirm before acting
 
-PATCH, DELETE, and the activate/deactivate/run actions modify the user's live Rankscale workspace. Before any write call, **state in plain language what will happen and to which item, then wait for explicit confirmation**. Example: *"I'll deactivate search term IZFBct… (\"Želim da kupim trosoban stan…\") on the City Expert brand. This stops it from running until reactivated. Proceed?"*
+PATCH, DELETE, and the activate/deactivate/run actions modify the user's live Rankscale workspace. Before any write call, **state in plain language what will happen and to which item, then wait for explicit confirmation**. Example: *"I'll deactivate search term IZFBct… (\"best running shoes for flat feet\") on the Acme brand. This stops it from running until reactivated. Proceed?"*
 
 The `run` action on a search term costs credits — always show the user the current `analysisCredits` balance and a rough cost estimate (each run typically consumes a handful of credits across multiple AI engines) before triggering.
 
@@ -159,5 +159,5 @@ Send `X-Request-Id` (any string you choose) when you want a correlation ID echoe
 - **Tables for the user, JSON for the file.** Save full JSON to `Rankscale/<thing>.json`; show the user a small markdown table or summary.
 - **Round metric numbers to 1 decimal** unless the user asks for raw values.
 - **Convert timestamps** to plain dates (YYYY-MM-DD) in user-facing output.
-- **Reference the saved JSON file** in your response (e.g., "Full data in [Rankscale/dashmoto_report.json](Rankscale/dashmoto_report.json)") so the user can ask follow-ups against it.
+- **Reference the saved JSON file** in your response (e.g., "Full data in [Rankscale/acme_report.json](Rankscale/acme_report.json)") so the user can ask follow-ups against it.
 - **Flag the `brandNotFound` quirk** in the report response when present — see quirks.md.

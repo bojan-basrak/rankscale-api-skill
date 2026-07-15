@@ -1,18 +1,35 @@
-# Rankscale API skill for Claude Code
+# Rankscale API skill
 
-A [Claude Code](https://claude.com/claude-code) skill that lets Claude query the
-[Rankscale](https://rankscale.ai) AI brand-visibility REST API on demand — so an
-SEO or marketing professional can pull data into reports, tables, and charts
-without clicking through the dashboard.
+An [Agent Skill](https://code.claude.com/docs/en/skills) that teaches your AI
+coding agent to query the [Rankscale](https://rankscale.ai) AI brand-visibility
+REST API on demand — so an SEO or marketing professional can pull data into
+reports, tables, and charts without clicking through the dashboard.
 
-Ask Claude things like:
+Ask your agent things like:
 
-> *"How is Dashmoto doing this week?"*
+> *"How is my brand doing this week?"*
 > *"Show me the citation sources for brand X."*
 > *"What's my Rankscale credit balance and runway?"*
 > *"List my tracked brands."*
 
 …and get clean tables back, with the raw JSON saved alongside for follow-ups.
+
+## Works with most agentic coding tools
+
+This is a plain-markdown skill (a `SKILL.md` plus reference files) that drives the
+REST API with `curl`. It's model- and provider-agnostic — nothing in it is tied
+to a specific AI vendor. It works with any agentic harness that can read a skill/
+instructions file and run shell commands, including:
+
+- **[Claude Code](https://claude.com/claude-code)** (native Agent Skills support)
+- **[Cursor](https://cursor.com)**
+- **[OpenAI Codex](https://openai.com/codex/)**
+- **[Windsurf](https://windsurf.com)**
+- **[Gemini CLI](https://github.com/google-gemini/gemini-cli)**
+- **[GitHub Copilot](https://github.com/features/copilot)** (agent mode)
+
+If your tool doesn't auto-load skills, just point it at [`SKILL.md`](SKILL.md) and
+it'll follow the instructions there.
 
 ## What it can do
 
@@ -26,19 +43,23 @@ Ask Claude things like:
 
 ## Requirements
 
-- Claude Code installed and signed in.
-- A Rankscale account with REST API access enabled (Agency Growth or Enterprise plan). If your API key starts with `rk_` you're set; otherwise email `support@rankscale.ai` to request REST API access.
+- An agentic coding tool that can read a skill file and run shell commands (see the list above).
+- A shell with `curl` available (JSON parsing uses whatever's on hand — `node`, `jq`, or `python`).
+- A Rankscale account with REST API access enabled (Agency Growth or Enterprise plan). If your API key starts with `rk_` you're set; otherwise ask the Rankscale team to enable REST API access.
 
 ## Install
 
-See **[INSTALL.md](INSTALL.md)** for the full 5-minute setup. In short:
+See **[INSTALL.md](INSTALL.md)** for the full setup. In short, for Claude Code:
 
 ```bash
-git clone https://github.com/bojan-basrak/rankscale-skill.git \
-  ~/.claude/skills/rankscale
+git clone https://github.com/bojan-basrak/rankscale-api-skill.git \
+  ~/.claude/skills/rankscale-api-skill
 ```
 
-Then set your API key as an environment variable and restart Claude Code:
+For other tools, place the folder wherever that tool loads skills or custom
+instructions from (or just open the repo and point your agent at `SKILL.md`).
+
+Then set your API key as an environment variable:
 
 ```bash
 # macOS / Linux — add to ~/.bashrc or ~/.zshrc
@@ -57,15 +78,27 @@ setx RANKSCALE_API_KEY "rk_your_key_here"
 | [`SKILL.md`](SKILL.md) | The skill itself — setup, calling patterns, and workflow recipes |
 | [`references/endpoints.md`](references/endpoints.md) | Full endpoint inventory, request shapes, engine catalog, error codes |
 | [`references/quirks.md`](references/quirks.md) | API behaviors that affect how numbers should be interpreted |
-| [`INSTALL.md`](INSTALL.md) | Teammate setup guide |
+| [`INSTALL.md`](INSTALL.md) | Setup guide |
 
 ## Security
 
 The skill reads the API key from the `RANKSCALE_API_KEY` environment variable and
 never prints it or writes it to disk. No credentials are stored in this
-repository.
+repository. Don't commit your key.
+
+## Disclaimer
+
+This is an **unofficial** skill. I am not affiliated with Rankscale — just a
+power-user of their tool, a beta-tester, and a friend of the Rankscale team.
+
+The official Rankscale API documentation is currently not public; it's available
+only to signed-in users (they'll likely change that soon).
+
+I'm an SEO & business-growth consultant, not a developer. I wouldn't even call
+myself a "vibe coder" — I barely read the files for this skill, which were
+created by Claude Opus 4.8. So use it at your own risk and discretion. I offer no
+guarantees and no support.
 
 ## License
 
-[MIT](LICENSE). Not affiliated with or endorsed by Rankscale — this is a
-community-built integration.
+[MIT](LICENSE).

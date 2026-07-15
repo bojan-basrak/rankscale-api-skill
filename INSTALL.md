@@ -1,26 +1,33 @@
-# Rankscale skill — install for teammates
+# Rankscale API skill — install
 
-A 5-minute setup that lets Claude Code pull data from your Rankscale workspace on demand. You'll be able to ask things like *"how is Dashmoto doing this week?"* or *"what's my credit balance?"* and get clean tables back.
+A quick setup that lets your AI coding agent pull data from your Rankscale
+workspace on demand. You'll be able to ask things like *"how is my brand doing
+this week?"* or *"what's my credit balance?"* and get clean tables back.
 
 ## Prereqs
 
-- Claude Code installed and signed in.
-- A Rankscale account with REST API access enabled. If your key starts with `rk_` you're set. Otherwise email `support@rankscale.ai` with subject *"Please activate REST API access for my account"*.
+- An agentic coding tool that can read a skill/instructions file and run shell commands — e.g. Claude Code, Cursor, OpenAI Codex, Windsurf, Gemini CLI, or GitHub Copilot (agent mode).
+- A shell with `curl` available.
+- A Rankscale account with REST API access enabled. If your key starts with `rk_` you're set. Otherwise ask the Rankscale team to activate REST API access for your account.
 
 ## 1 — Drop the skill into place
 
-**Option A — clone from GitHub (recommended):**
+**Claude Code** — clone (or download) so the folder lands in your skills directory:
+
 ```bash
-git clone https://github.com/bojan-basrak/rankscale-skill.git ~/.claude/skills/rankscale
+git clone https://github.com/bojan-basrak/rankscale-api-skill.git ~/.claude/skills/rankscale-api-skill
 ```
-On Windows, `~` resolves to `%USERPROFILE%`, so this lands at `%USERPROFILE%\.claude\skills\rankscale\`.
 
-**Option B — download the ZIP:** grab it from the repo's green **Code ▸ Download ZIP** button and unzip so the folder lands at:
+On Windows, `~` resolves to `%USERPROFILE%`, so this lands at
+`%USERPROFILE%\.claude\skills\rankscale-api-skill\`.
 
-- **Windows:** `%USERPROFILE%\.claude\skills\rankscale\`
-- **macOS / Linux:** `~/.claude/skills/rankscale/`
+**Other tools** — put the folder wherever your tool loads skills or custom
+instructions from (for example, a project-level rules/instructions folder), or
+simply open the repo in your workspace and point your agent at `SKILL.md`. You
+should see `SKILL.md` and a `references/` folder inside.
 
-Either way, you should see `SKILL.md` and a `references/` folder inside.
+**Download instead of clone:** use the repo's green **Code ▸ Download ZIP**
+button and unzip to the same location.
 
 ## 2 — Set your API key as an environment variable
 
@@ -36,17 +43,18 @@ export RANKSCALE_API_KEY="rk_your_key_here"
 ```
 Then `source` it or open a new terminal.
 
-## 3 — Restart Claude Code
+## 3 — Restart your agent
 
-So it picks up the new skill folder.
+So it picks up the new skill folder / environment variable.
 
 ## 4 — Try it
 
-Open Claude Code in any working directory and ask:
+Open your agent in any working directory and ask:
 
 > *"List my Rankscale brands."*
 
-Claude should call the API and show your brands as a table. If it asks for your API key, the env var didn't take — re-check step 2.
+It should call the API and show your brands as a table. If it asks for your API
+key, the env var didn't take — re-check step 2.
 
 ## What the skill can do
 
@@ -62,10 +70,17 @@ Claude should call the API and show your brands as a table. If it asks for your 
 
 - The skill saves full JSON responses into a `Rankscale/` folder in your current working directory, so you can ask follow-up questions or build charts without re-calling the API.
 - Destructive actions (delete, deactivate, run-now which costs credits) always ask before executing.
-- Server-side date filtering works reliably when parameters are cased correctly (`timeFrame`, `isoStartDate`/`isoEndDate`). Always sanity-check that the returned window matches what you asked for. (An earlier "only ~7-8 days" note was a mis-casing bug, since fixed.)
+- Server-side date filtering works reliably when parameters are cased correctly (`timeFrame`, `isoStartDate`/`isoEndDate`). Always sanity-check that the returned window matches what you asked for.
 
 ## Trouble?
 
-- **"Skill not triggering"**: try mentioning *"Rankscale"* explicitly in your prompt; restart Claude Code if you just installed.
+- **"Skill not triggering"**: try mentioning *"Rankscale"* explicitly in your prompt; restart your agent if you just installed it.
 - **HTTP 401/403**: API key is wrong, expired, or REST access isn't activated yet.
-- **HTTP 404 with HTML body**: the marketing site served a 404 — check the URL path is `/v1/...` not `/api/v1/...` (the skill handles this, but worth knowing if you build something custom).
+- **HTTP 404 with HTML body**: check the URL path is `/v1/...` not `/api/v1/...` (the skill handles this, but worth knowing if you build something custom).
+
+## Disclaimer
+
+This is an **unofficial** skill — not affiliated with or endorsed by Rankscale,
+built by a power-user and beta-tester. Provided as-is, with no guarantees and no
+support. Use at your own risk. See the [README](README.md#disclaimer) for the
+full note.
