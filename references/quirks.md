@@ -89,7 +89,13 @@ An API key (`rk_<hash>_<brandId>`) only reaches brands in the workspace that iss
 
 ## 16. `competitorTimeSeriesData` excludes the own brand
 
-The per-competitor series in `data.competitorTimeSeriesData` lists competitors only — the tracked brand is **not** in it. Its daily values live in `data.ownBrandMetrics.historicalData.<agg>`. To compute a daily Brand Rank you must merge the two (timestamps align — verify first/last). This competitor set is also smaller (~25–35) than the full detected pool in `competitorMetrics` (dozens), so daily ranks for low-visibility brands are lower bounds. See the Brand Rank recipe (SKILL.md §6).
+The per-competitor series in `data.competitorTimeSeriesData` lists competitors only — the tracked brand is **not** in it. Its daily values live in `data.ownBrandMetrics.historicalData.<agg>`. To compute a daily Brand Rank you must merge the two (timestamps align — verify first/last). This competitor set is also smaller (~25–35) than the full detected pool in `competitorMetrics` (dozens), so daily ranks for low-visibility brands are lower bounds. It also only backfills the trailing ~2 weeks (quirk 16b). See the Brand Rank recipe (SKILL.md §6).
+
+## 16b. `competitorTimeSeriesData` only backfills the trailing ~2 weeks
+
+In `POST /v1/metrics/report`, `data.competitorTimeSeriesData` (both `daily` and `weekly` aggregation) only carries competitor values for roughly the trailing ~2 weeks of the requested window. Earlier buckets are `0` for **every** competitor, even when the competitors were demonstrably present in that period — re-querying an earlier block alone as its own window returns real (non-zero) `competitorMetrics` aggregates for the same dates where the full-window series showed 0 (verified 2026-07-15). The own-brand series (`ownBrandMetrics.historicalData`) is complete for the full window, and window-level `competitorMetrics` aggregates remain valid for the full period.
+
+**Practical guidance:** when plotting competitor time series, null-out (don't zero) competitor values older than ~2 weeks and caption the truncation. Daily Brand Ranks (SKILL.md §6) computed from those older buckets are spurious — the entire competitor pool reads 0, so the own brand appears rank 1. Use window aggregates for anything beyond the trailing ~2 weeks.
 
 ## 17. Aggregate metrics are period-weighted, not daily averages
 

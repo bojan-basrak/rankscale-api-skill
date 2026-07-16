@@ -128,6 +128,7 @@ Key fields: `data.totalCitations`, `data.uniqueDomains`, and `data.citationsByDo
 
 **Caveats — state these when reporting:**
 - **Aggregate ≠ average of daily.** The aggregate rank is period-weighted share-of-voice, so a brand can be aggregate rank 1 yet daily rank 2 on most days (quirk 17). Don't reconcile them.
+- **~2-week competitor backfill.** `competitorTimeSeriesData` only carries competitor values for roughly the trailing ~2 weeks of the window — earlier buckets are 0 for every competitor, so daily ranks there are spurious rank-1s (quirk 16b). Null-out (don't zero) those older values and caption the truncation; window aggregates stay valid.
 - **Low-visibility lower bound.** `competitorTimeSeriesData` carries a smaller competitor set (~25–35) than the full detected pool in `competitorMetrics` (dozens). For a deep long-tail brand the daily rank is a *lower bound* — a competitor absent from the series could outrank it on a given day. Flag it.
 - **Cross-surface note.** If computing this via the Rankscale MCP instead of the API, ignore its `own_brand_rank` field — it is always `1` (a display pin), not a ranking.
 - When a rank surprises you, cross-check the dashboard UI before trusting it.
