@@ -2,14 +2,25 @@
 
 Read this before presenting metrics to the user. None of these are bugs — they're behaviors that affect how the numbers should be interpreted or how to call the API correctly.
 
-## 1. Parameter names are camelCase-strict, and unknowns are silently ignored
+## 1. Parameter names are camelCase-strict — but the API now tells you when you get it wrong
 
-The reporting body uses **`timeFrame`** (capital F), not `timeframe` or `time_frame`. Same goes for `isoStartDate`, `isoEndDate`, `selectedTopic`, `includeNotFoundExecutions`, etc. Send the wrong casing or a guessed name (`window`, `lookbackDays`, `range`, `period`…) and the API will:
+The reporting body uses **`timeFrame`** (capital F), not `timeframe` or `time_frame`. Same goes for `isoStartDate`, `isoEndDate`, `selectedTopic`, `includeNotFoundExecutions`, etc. Send the wrong casing or a guessed name (`window`, `lookbackDays`, `range`, `period`…) and the API will still:
 1. Return HTTP 200 with `success: true`
-2. Silently drop the unknown field
+2. Drop the unknown field
 3. Apply its default behavior
 
-The result *looks* like the API is responding to your filter but in fact it's ignoring it. **Always check that the response window matches what you asked for** (e.g. `data.ownBrandMetrics.historicalData.daily.timestamps.length` should be ~30 for a `30d` request with `daily` aggregation). If it doesn't match, you almost certainly mistyped a param name.
+**As of the 2026-07-29 API revision this is no longer silent.** The response envelope carries a top-level **`warnings[]`** array naming every field it ignored, often with a did-you-mean. Verified live 2026-07-29 — sending `{"startDate":"2026-07-01","timeframe":"7d"}` returned:
+
+```json
+"warnings": [
+  "Ignored unrecognized field 'startDate'. Did you mean 'isoStartDate'? Falling back to the default reporting window.",
+  "Ignored unrecognized field 'timeframe'."
+]
+```
+
+**So the first thing to check on any reporting response is `warnings`.** It is omitted entirely when the request was clean, so `if (json.warnings) { … }` is a reliable one-line guard. Surface it to the user rather than swallowing it — a warning means the numbers you just got answer a different question than the one asked.
+
+Still verify the window independently, because `warnings` only catches *unrecognized* fields — a recognized field with a wrong value won't warn. Check `data.ownBrandMetrics.historicalData.daily.timestamps.length` (~30 for `30d` + `daily`), or read `data.requestedDateRange` on `/search-terms-report`.
 
 The full canonical body schema for `/report` is in `endpoints.md`.
 
@@ -43,9 +54,15 @@ The `trends` object is the raw change vs. the previous comparable window (same l
 - For `visibilityScore`, `sentiment`, `mentions`, `citations`, `detectionRate`, `top3` — positive = up = better.
 - For `avgPosition` — positive = position got higher in number = *worse* (lower rank). Negative = better. Always explain this in user-facing output ("avg position improved by 0.4").
 
-## 6. URL gotcha: `/v1/...`, not `/api/v1/...`
+## 6. URL gotcha: `/v1/...`, not `/api/v1/...` — and not every HTML body is a path error
 
 The API sits at `https://rankscale.ai/v1/...` on the marketing domain. Using `https://rankscale.ai/api/v1/...` returns a Next.js HTML 404 page (Content-Type: text/html), which is confusing because it looks like a network error rather than a path error. `https://api.rankscale.ai/...` does not resolve.
+
+**But don't diagnose every HTML body as a bad path.** A heavy request can come back as a transient **`502 Server Error`** with a generic HTML error page (observed 2026-07-29 on a `3m` `/sentiment` call; the identical request succeeded on immediate retry with a 17 MB JSON body). Distinguish them by status code, not by the fact that the body isn't JSON:
+- **404 + HTML** → wrong path. Fix the URL; retrying won't help.
+- **502/503/504 + HTML** → transient gateway failure, most likely on a large payload. Retry once, then narrow the window (`3m` → `30d`) or add filters to shrink the response.
+
+Because both arrive as unparseable text, always capture the HTTP status alongside the body (`curl -w '%{http_code}'` or `-i`) on heavy calls — otherwise a retryable 502 gets misread as a broken integration.
 
 ## 7. Param name inconsistency: `brandId` vs `brandRef`
 
@@ -79,6 +96,25 @@ Two more gotchas in `domainSummary`:
 - `topDomainsByOwnBrandCitations` (domains that cite the tracked brand) and `topDomainsByCompetitor` are **capped at 20 / 10 entries** respectively. Don't treat them as complete.
 - `topDomainsByCompetitor` groups domains where a **competitor was mentioned** — this includes neutral third-party sites (Reddit, Booking, review blogs), NOT just competitor-owned domains. To find competitor-*owned* sites (e.g. to exclude them from an opportunity list), classify domains by judgment; don't rely on this field.
 
+## 13c. `/citations` silently caps at 5,000 unique URLs and 50 brands — `paginationInfo` tells you
+
+The citations response is capped by default, and the cap is on **unique** URLs, not total citations. Verified 2026-07-29 (`3m`, one brand): `totalCitations: 16599`, `uniqueCitations: 4008`, `uniqueDomains: 1008` — and `paginationInfo.totalCount` was `4008`, tracking *unique* citations. So a brand can be far past 5,000 total citations while still under the cap.
+
+`data.paginationInfo` is the full diagnostics block (only `responseTrimmed` is documented upstream):
+
+```
+hasMore, totalCount, returnedCount,
+citationsCapped, brandsCapped, capBypassed,
+maxCitations: 5000, maxBrands: 50,
+responseTrimmed, returnedDomainCount, totalDomainCount
+```
+
+**`maxBrands: 50` is undocumented** — the citation breakdown covers at most 50 brands. On a brand with a large competitor set, `brandsCapped: true` means the per-competitor citation cuts are partial.
+
+Pass **`uncapped: true`** (body or query param) to bypass the URL cap; it flips `capBypassed: true`. It does *not* remove the response-size guard, so still check `responseTrimmed` — and note `uncapped` doesn't lift `maxBrands`.
+
+**Before telling the user a citation list is complete, read `citationsCapped`, `brandsCapped`, and `responseTrimmed`.** If any is `true`, say so and narrow the window or filter by topic/engine instead of presenting a truncated list as the whole picture. Uncapped payloads get big — a `3m` pull ran ~3.9 MB — so always `-o` to a file.
+
 ## 14. Workspace-member API keys resolve to the owner
 
 If a workspace member generates an API key, all reads and writes operate on the **workspace owner's** data. This is fine in practice but worth knowing if multiple teammates have keys — you're all reading and writing the same dataset.
@@ -103,4 +139,18 @@ Window-level `visibilityScore` (and any Brand Rank derived from it) is a weighte
 
 ## 18. Date filtering is reliable — the old "~7–8 days only" claim was a mis-casing artifact
 
-Custom ranges (`isoStartDate`/`isoEndDate`) and long presets (`30d`, `3m`, `1y`) return the full requested window **when the params are cased correctly** (quirk 1). The earlier belief that the API "only returns the last 7–8 days" came from sending `timeframe` (wrong case), which was silently dropped. Verified in practice: `30d`/`daily` returns the correct daily buckets and custom ISO ranges are honored (mind the exclusive end, quirk 1b). Still verify the returned `timestamps[]` span matches the request — but don't fall back to the dashboard for long windows; the API handles them.
+Custom ranges (`isoStartDate`/`isoEndDate`) and long presets (`30d`, `3m`, `1y`) return the full requested window **when the params are cased correctly** (quirk 1). The earlier belief that the API "only returns the last 7–8 days" came from sending `timeframe` (wrong case), which was silently dropped — a mistake the `warnings[]` array now catches for you. Verified in practice: `30d`/`daily` returns the correct daily buckets and custom ISO ranges are honored (mind the exclusive end, quirk 1b). Still verify the returned `timestamps[]` span matches the request — but don't fall back to the dashboard for long windows; the API handles them.
+
+## 19. `/sentiment` is the heaviest endpoint, and its counts are not execution counts
+
+Two separate traps, both verified 2026-07-29 on one brand.
+
+**Payload size.** `/sentiment` returned **~9 MB for `30d`** and **~17 MB for `3m`** — two to three orders of magnitude heavier than `/report` (~40–50 KB). The driver: every keyword in `webGroundingKeywords` / `trainingDataKeywords` carries a full `executionIds[]` array *and* a parallel `timestamps[]` array of every execution that produced it. Always write it to a file with `-o` and extract only the fields you need; never read the payload inline. It is also the endpoint most likely to throw a transient 502 (quirk 6).
+
+**`positiveCount` / `neutralCount` / `negativeCount` are keyword-level, not execution-level.** They do not sum to `sentimentCount`. Observed: `positiveCount 1489 + neutralCount 318 + negativeCount 135 = 1942`, while `sentimentCount` and `executionCount` were both `835`. So:
+- **Never** compute "% of executions that were positive" as `positiveCount / (positiveCount + neutralCount + negativeCount)`. That's a share of *sentiment keywords*, not of executions — label it that way.
+- `avgSentiment` is exactly `totalSentimentScore / sentimentCount`, on a **0–100** scale (not −1…1). Verified: `71079 / 835 = 85.12`.
+
+**Web-grounded vs training-data sentiment are separate sources.** Each entry carries `hasWebGrounding` and `hasTrainingData` booleans with parallel `webGrounding*` / `trainingData*` blocks. A brand can be `hasWebGrounding: true, hasTrainingData: false` (observed), in which case the `trainingData*` buckets exist but are empty — don't report `0` sentiment from training data as a finding when the source simply didn't contribute. `webGroundingSentimentByEngine[<engineId>]` is `{sum, count, avg}`, so per-engine sentiment is `avg` — don't re-derive it.
+
+**Two arrays, different scopes:** `brandSentiments[]` is the tracked brand only (typically one entry); `companySentiments[]` is every detected brand including the own brand (`isOwnBrand: true`) — 38 entries on the test brand. For competitor sentiment comparisons use `companySentiments`. The undocumented `brandSentimentsBySearchTerm[]` / `companySentimentsBySearchTerm[]` give the same cuts per search term.

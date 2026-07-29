@@ -90,7 +90,7 @@ setx RANKSCALE_API_KEY "rk_your_key_here"
 ## Limitations
 
 - **Paid plans only.** REST API access is available on Rankscale's Agency Growth and Enterprise plans. If you don't have an `rk_` key, the skill can't do anything — ask the Rankscale team to enable it.
-- **The API may change without notice.** The official docs aren't public yet, so this skill was built from hands-on probing. Endpoints, field names, and behaviors can shift; if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
+- **The API may change without notice.** Rankscale now publishes an official OpenAPI 3.1.0 reference for the Metrics API (help center → Metrics API, signed-in only); this skill is reconciled against it and filled in with hands-on probing where the spec is loose or silent. Last reconciled against the **2026-07-29** docs revision. Endpoints, field names, engine IDs, and behaviors do shift — if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
 - **No live validation here.** Nothing in this repo is tested against your account. Always sanity-check that returned time windows and numbers match what you asked for before trusting a report.
 - **Rate limits apply.** 200 requests/min per key; the skill caches and batches, but heavy ad-hoc use can hit the ceiling.
 
@@ -105,8 +105,9 @@ repository. Don't commit your key.
 This is an **unofficial** skill. I am not affiliated with Rankscale — just a
 power-user of their tool, a beta-tester, and a friend of the Rankscale team.
 
-The official Rankscale API documentation is currently not public; it's available
-only to signed-in users (they'll likely change that soon).
+The official Rankscale API documentation is not public; it's available only to
+signed-in users, in the help center (they'll likely change that soon). This skill
+is reconciled against that reference but is not a substitute for it.
 
 I'm an SEO & business-growth consultant, not a developer. I wouldn't even call
 myself a "vibe coder" — I barely read the files for this skill, which were

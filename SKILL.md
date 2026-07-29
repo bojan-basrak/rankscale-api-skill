@@ -22,9 +22,22 @@ This skill calls the REST API directly so the user (an SEO professional, not a d
 
 Every endpoint returns `{success: true, data: {...}}` on success, or `{success: false, error: {code, message, details}}` on failure. Always check `.success` before reading `.data`.
 
+**Check `warnings` too.** A successful response may carry a third top-level key, `warnings[]`, listing any request fields the API didn't recognize and ignored — often with a did-you-mean (`"Ignored unrecognized field 'startDate'. Did you mean 'isoStartDate'? …"`). It's absent when the request was clean, so `if (json.warnings)` is a reliable guard. **A warning means the numbers answer a different question than the one asked** — the API falls back to defaults for the dropped field. Surface it to the user instead of swallowing it; this is the cheapest possible catch for the camelCase trap (quirks §1).
+
 Save raw JSON responses to a file next to the user's work (typically `Rankscale/<endpoint>_<context>.json`) so they can be re-analyzed without re-calling the API. Show the user a clean summary, not raw JSON, unless they ask for it.
 
 **Token efficiency — the biggest lever.** For anything bulk (multi-topic, multi-engine, full history, or `/search-terms-report` with `includeAnswerTexts`), write the response straight to disk with `-o` and extract only the values you need with `node -e`. Do **not** read whole `/report` payloads into context — one filtered report runs ~40–50 KB and a 7-topic sweep is ~300 KB. Extracting scalars/series client-side keeps that off-context and, on bulk pulls, roughly halves token usage versus reading payloads inline. (For a single narrow metric the overhead isn't worth it — just read the small response.)
+
+**Payload sizes are wildly uneven — plan around them.** Measured on a single brand:
+
+| Endpoint | Window | Size |
+|---|---|---|
+| `/report` (filtered) | 30d | ~40–50 KB |
+| `/citations` | 3m | ~3.9 MB |
+| `/sentiment` | 30d | ~9 MB |
+| `/sentiment` | 3m | ~17 MB |
+
+`/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6).
 
 ```bash
 # Bash (Git Bash / WSL / macOS / Linux)
@@ -55,6 +68,8 @@ curl.exe -s -X POST -H "Authorization: Bearer $env:RANKSCALE_API_KEY" `
 Note in PowerShell: use `curl.exe` (the alias `curl` points to `Invoke-WebRequest`, which behaves differently), escape inner quotes in `-d` JSON bodies with `\"`, and use backtick `` ` `` for line continuation. `Invoke-RestMethod` also works and auto-parses JSON, but the curl form keeps responses consistent across shells.
 
 The complete endpoint inventory and request shapes live in `references/endpoints.md`. Read it before any call you're not sure about. Surprises and gotchas are in `references/quirks.md` — **read it before reporting metrics to the user**, because several of them affect how the numbers should be interpreted.
+
+**Out of scope: the Share Links API.** Rankscale publishes a second REST API for public dashboard share links. It uses a different key (Settings → Sharing, not Settings → Integrations), so `RANKSCALE_API_KEY` won't authenticate against it. If the user asks to create or revoke a share link, say it's a separate API this skill doesn't cover — don't guess at its paths.
 
 ## Workflow recipes
 
@@ -99,15 +114,25 @@ Present a metrics table with these columns: Date, Visibility, Sentiment, Mention
 
 `/v1/metrics/citations` returns which sources (sites, articles) AI models cite when answering the user's search terms. Useful for understanding which third-party domains influence AI answers about a brand.
 
-Key fields: `data.totalCitations`, `data.uniqueDomains`, and `data.citationsByDomain[]` (every domain). In each domain entry, **`occurrences` is the count; the `citations` field is the array of URLs, not a number** — so citation share = `occurrences / totalCitations`, and top URLs come from flattening each domain's URL array and sorting by `occurrences`. `data.domainSummary` has pre-cut views (`topDomainsOverall`, `topDomainsByEngine`, `topDomainsByQuery`, `topDomainsByOwnBrandCitations`, `topDomainsByCompetitor`) — but these are capped (≈20/10 entries) and `topDomainsByCompetitor` lists domains where a *competitor was mentioned* (includes neutral third-party sites like Reddit/Booking), so don't use it to identify competitor-*owned* sites. See quirks.md §13b.
+Key fields: `data.totalCitations`, `data.uniqueCitations` (distinct URLs), `data.uniqueDomains`, and `data.citationsByDomain[]` (every domain). In each domain entry, **`occurrences` is the count; the `citations` field is the array of URLs, not a number** — so citation share = `occurrences / totalCitations`, and top URLs come from flattening each domain's URL array and sorting by `occurrences`. `data.domainSummary` has pre-cut views (`topDomainsOverall`, `topDomainsByEngine`, `topDomainsByQuery`, `topDomainsByOwnBrandCitations`, `topDomainsByCompetitor`) — but these are capped (≈20/10 entries) and `topDomainsByCompetitor` lists domains where a *competitor was mentioned* (includes neutral third-party sites like Reddit/Booking), so don't use it to identify competitor-*owned* sites. See quirks.md §13b.
+
+**Check the caps before calling a list complete.** The response caps at **5,000 unique URLs** and **50 brands** by default. `data.paginationInfo` reports the truth — `citationsCapped`, `brandsCapped`, `responseTrimmed`, `capBypassed`, `maxCitations`, `maxBrands`, `totalCount` vs `returnedCount`. Pass **`uncapped: true`** (body or query param) to lift the URL cap; it does not lift the 50-brand cap or the response-size guard. `deduplicated: true` deduplicates response paths and adds `data.searchTermsById`. If any cap flag is `true`, tell the user and narrow the window or filter rather than presenting a truncated list as the full picture. See quirks.md §13c.
 
 ### 4. Sentiment
 
-`/v1/metrics/sentiment` returns sentiment breakdowns — positive/neutral/negative mentions over time. Lower granularity than the main report but more focused.
+`/v1/metrics/sentiment` returns **window-level sentiment aggregates plus keyword clouds** for the tracked brand and every competitor — not a time series (use `/report`'s `historicalData.<agg>.sentiment[]` for sentiment over time). Same shared filters, plus `deduplicated: true`.
+
+Two arrays with different scopes: `data.brandSentiments[]` is the tracked brand only; `data.companySentiments[]` is every detected brand including the own brand (`isOwnBrand: true`) — use this one for competitor comparisons. `brandSentimentsBySearchTerm[]` / `companySentimentsBySearchTerm[]` give the same cuts per search term.
+
+Per entry: `avgSentiment` (**0–100 scale**, = `totalSentimentScore / sentimentCount`), `sentimentCount`, `executionCount`, and `positiveCount` / `neutralCount` / `negativeCount`. Sentiment is split by source — `webGrounding*` (web-grounded engines) vs `trainingData*` blocks, gated by the `hasWebGrounding` / `hasTrainingData` booleans, with `webGroundingSentimentByEngine[<engineId>] = {sum, count, avg}` for per-engine scores.
+
+**Two traps — read quirks.md §19 before reporting any of this.** (1) `positiveCount + neutralCount + negativeCount` are *keyword*-level and do **not** sum to `sentimentCount`/`executionCount`, so never present their ratio as "% of executions that were positive." (2) This is the heaviest endpoint in the API (~9 MB for `30d`) — always write to a file, never read it inline.
 
 ### 5. Credits
 
 `/v1/metrics/credits` returns balances + runway. Show `rankCredits`, `analysisCredits`, `promptResearchCredits`, and the estimated `runway.estimatedRunwayHours` (convert to days for readability). Mention `creditsInFlight` if non-zero (means runs are queued/in-progress).
+
+The response carries two runway views: `runway` (detailed simulation, bounded — check `simulationLimitedByBilling` / `simulationLimitedByHorizon` and say which limit capped the estimate) and `dashboardRunway` (the burn-rate view the app's dashboard shows). Quote one, not a blend of both. `runway.nextBilling` can be `null`, so guard before reading `._seconds`.
 
 ### 6. Brand Rank (by Visibility) — custom metric
 

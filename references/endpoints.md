@@ -2,6 +2,17 @@
 
 Server: `https://rankscale.ai`. All endpoints sit under `/v1/`. Authentication: `Authorization: Bearer <RANKSCALE_API_KEY>`. POST endpoints require `Content-Type: application/json`. All responses follow the `{success, data}` / `{success, error}` envelope.
 
+**`warnings[]` — third envelope key.** A successful response may carry a top-level `warnings` array alongside `data` when the request contained fields the API didn't recognize. It is omitted entirely when there's nothing to report. Example (verified live 2026-07-29):
+
+```json
+{"success": true, "data": {...}, "warnings": [
+  "Ignored unrecognized field 'startDate'. Did you mean 'isoStartDate'? Falling back to the default reporting window.",
+  "Ignored unrecognized field 'timeframe'."
+]}
+```
+
+**Always check `warnings` before trusting a reporting response** — it is the fastest way to catch the camelCase trap in quirks §1. Request bodies allow additional properties, so a mistyped field never errors; it lands here instead.
+
 Rate limit: **200 requests per minute per API key.** Response headers include `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (seconds to window reset), and `X-API-Version` (currently `1`). The API echoes any `X-Request-Id` you send.
 
 Auth fallback for clients that can't set headers: `?api_key=$RANKSCALE_API_KEY` query param. Prefer the header form.
@@ -17,6 +28,7 @@ The API is available on **Agency Growth** and **Enterprise** plans only.
 - [Topics](#topics)
 - [Credits](#credits)
 - [Error codes](#error-codes)
+- [Not covered: Share Links API](#not-covered-share-links-api)
 
 ---
 
@@ -84,13 +96,87 @@ curl -X POST https://rankscale.ai/v1/metrics/report \
 
 Same shared filters. Supports `includeAnswerTexts: true` to include the raw AI answer text for each execution (heavier payload).
 
+Response (`data`):
+
+```
+data.timeFrame
+data.requestedDateRange: {source, startDate, endDate}   # echo of the resolved window — check this
+data.searchTerms[]:
+  searchTermId, query, aiSearchEngines[], tags[], status
+  topic: {id, name}
+  interval, region, websearch, lastSnapshotAt
+  ownBrand:      {name, visibilityScore, avgRank, detectionRate, top3, citationCount, avgSentiment}
+  competitors[]: {name, visibilityScore, avgRank, detectionRate, top3, citationCount, avgSentiment}
+  answerTexts[]: {executionId, executedAt, engine, answerText}   # only with includeAnswerTexts
+```
+
+`requestedDateRange` is the cheapest way to confirm the window the API actually applied (cf. quirks §1).
+
 ### POST `/v1/metrics/sentiment` — brand sentiment
 
-Returns aggregate sentiment for the tracked brand and competitors, plus keyword clouds. Same shared filters.
+Returns aggregate sentiment plus keyword clouds for the tracked brand and competitors. Same shared filters, plus:
+
+| Field | Type | Notes |
+|---|---|---|
+| `deduplicated` | boolean | Deduplicates sentiment response paths where supported. Adds per-search-term cuts. |
+
+Response (`data`) — observed shape is wider than the published schema:
+
+```
+data.brandSentiments[]                # the tracked brand (typically n=1)
+data.companySentiments[]              # every detected brand incl. own (isOwnBrand: true) — dozens
+data.brandSentimentsBySearchTerm[]    # undocumented; per-search-term cut
+data.companySentimentsBySearchTerm[]  # undocumented; per-search-term cut
+
+each entry:
+  name, isOwnBrand, nameVariations[]
+  totalSentimentScore, sentimentCount, avgSentiment       # avgSentiment = totalSentimentScore / sentimentCount, 0–100
+  positiveCount, neutralCount, negativeCount              # keyword-level, NOT executions (quirks §19)
+  executionCount
+  hasWebGrounding, hasTrainingData                        # which sources contributed
+  positiveKeywords, neutralKeywords, negativeKeywords     # objects, not arrays
+  webGroundingKeywords:  {positive, neutral, negative, byEngine}
+  trainingDataKeywords:  {positive, neutral, negative, byEngine}   # empty when hasTrainingData: false
+  webGroundingSentimentByEngine:  {<engineId>: {sum, count, avg}}
+  trainingDataSentimentByEngine:  {<engineId>: {sum, count, avg}}
+```
+
+**This is the heaviest endpoint in the API** — ~9 MB for `30d`, ~17 MB for `3m` on a single brand, because every keyword carries full `executionIds[]` and `timestamps[]` arrays. Always `-o` to a file; never read the payload inline. See quirks §19.
 
 ### POST `/v1/metrics/citations` — citation analytics
 
-URL- and domain-level citation aggregations with breakdowns by engine, query, own brand, and competitors. Same shared filters.
+URL- and domain-level citation aggregations with breakdowns by engine, query, own brand, and competitors. Same shared filters, plus two options accepted **either as query params or in the body**:
+
+| Field | Type | Notes |
+|---|---|---|
+| `deduplicated` | boolean | Deduplicates citation response paths where supported. Adds `data.searchTermsById`. |
+| `uncapped` | boolean | Bypasses the default **5,000 unique-URL** detail cap for API callers. A final response-size guard may still trim the JSON — check `paginationInfo.responseTrimmed`. |
+
+```bash
+curl -X POST 'https://rankscale.ai/v1/metrics/citations?deduplicated=true&uncapped=true' \
+  -H "Authorization: Bearer $RANKSCALE_API_KEY" -H "Content-Type: application/json" \
+  -d '{"brandId":"brand_abc123","timeFrame":"30d"}'
+```
+
+Response (`data`):
+
+```
+totalCitations        # sum of all occurrences (e.g. 16599)
+uniqueCitations       # distinct normalized URLs (e.g. 4008) — what the 5,000 cap counts
+uniqueDomains         # distinct domains (e.g. 1008)
+totalBrands           # undocumented; brands in the citation breakdown
+timestampFormat       # undocumented; bucket the API chose, e.g. "weekly"
+paginationInfo: {hasMore, totalCount, returnedCount,
+                 citationsCapped, brandsCapped, capBypassed,
+                 maxCitations: 5000, maxBrands: 50,
+                 responseTrimmed, returnedDomainCount, totalDomainCount}
+domainSummary: {topDomainsOverall, topDomainsByEngine, topDomainsByQuery,
+                topDomainsByOwnBrandCitations, topDomainsByCompetitor}
+citationsByDomain[]: {domain, occurrences, citations[]}   # `citations` is URLs, not a count (quirks §13b)
+searchTermsById       # only with deduplicated: true
+```
+
+`paginationInfo` is the full cap-diagnostics block (only `responseTrimmed` is documented upstream). Read it before claiming a citation list is complete — see quirks §13c. A `3m` pull runs ~3.9 MB; write it to a file.
 
 ---
 
@@ -140,7 +226,8 @@ All four reporting endpoints accept the same time-window and filter fields.
 | Google Gemini 2.0 Flash | `google_gemini_20` | deprecated 2026-04-01 → `google_gemini_30_flash` |
 | Google Gemini 2.5 Flash | `google_gemini_25` | deprecates 2026-06-17 → `google_gemini_30_flash` |
 | Google Gemini 3 Flash | `google_gemini_30_flash` | active |
-| Google Gemini 3 Pro | `google_gemini_30_Pro` | active |
+| Google Gemini 3 Pro | `google_gemini_30_Pro` | **deprecated** → `google_gemini_31_Pro` |
+| Google Gemini 3.1 Pro | `google_gemini_31_Pro` | active |
 | Anthropic Claude 3.5 Sonnet | `anthropic_claude_3_5_sonnet` | active |
 | Anthropic Claude 3.5 Haiku | `anthropic_claude_3_5_haiku` | deprecated 2026-02-19 |
 | Anthropic Claude 4.5 Haiku | `anthropic_claude_4_5_haiku` | active |
@@ -148,6 +235,10 @@ All four reporting endpoints accept the same time-window and filter fields.
 | Mistral Large | `mistral_large` | active |
 
 Some endpoints accept friendly names (`ChatGPT`, `Perplexity`, `Gemini 2.5`, `Claude Haiku`, `Grok`, `Bing Copilot`) but **prefer IDs for integrations** — they're stable across naming changes.
+
+Note the inconsistent casing in the Gemini Pro IDs (`_Pro`, capital P) versus every other ID. Copy them exactly. Reporting responses may return legacy IDs for historical executions even after an engine is retired, so don't treat an unknown ID in a response as an error.
+
+*Catalog current as of the 2026-07-29 docs revision.* Engines get deprecated on a rolling basis — if `400 deprecated_engine` fires on an ID listed active here, the catalog has moved on.
 
 ---
 
@@ -223,12 +314,17 @@ data:
   rankCredits, bonusRankCredits, analysisCredits, promptResearchCredits, creditsInFlight
   runway:
     estimatedRunwayHours, creditsPerHourAvg, totalCostForNextExecution
-    nextBilling: {_seconds, _nanoseconds}
+    nextBilling: {_seconds, _nanoseconds}   # may be null
     simulationLimitedByBilling, simulationLimitedByHorizon
-    breakdown: {hourly, ...}
+    breakdown: [...]
+  dashboardRunway:                          # dashboard-style burn-rate runway metrics
 ```
 
-Convert `estimatedRunwayHours / 24` for days. `nextBilling._seconds` is a Unix epoch timestamp.
+Convert `estimatedRunwayHours / 24` for days. `nextBilling._seconds` is a Unix epoch timestamp; the field can also come back `null` (no scheduled billing date), so guard before reading into it.
+
+`runway` is the detailed simulation; `dashboardRunway` is the burn-rate view the app's dashboard shows. They can disagree — `runway` is bounded by `simulationLimitedByBilling` / `simulationLimitedByHorizon`, so quote `runway.estimatedRunwayHours` and mention which limit capped it rather than mixing the two.
+
+The endpoint also documents `404 not_found` and `405 method_not_allowed` alongside the usual auth/rate-limit errors. It takes no body and no filters — it's the one plain `GET` in the reporting set.
 
 ---
 
@@ -257,4 +353,12 @@ Error envelope:
 }}
 ```
 
-A non-JSON `404` with HTML body almost always means a wrong path — most often `/api/v1/...` instead of `/v1/...`.
+A non-JSON `404` with HTML body almost always means a wrong path — most often `/api/v1/...` instead of `/v1/...`. A non-JSON **`502`** with an HTML body is different: transient gateway failure on a heavy response, not a path error. Retry it. See quirks §6.
+
+---
+
+## Not covered: Share Links API
+
+Rankscale publishes a second REST API — the **Share Links API** — for creating and managing public share links to brand dashboards. It is **not** part of this skill and uses a **different key**, issued from Settings → Sharing rather than Settings → Integrations, so `RANKSCALE_API_KEY` will not authenticate against it.
+
+If the user asks to create, list, or revoke a public dashboard share link, say that it's a separate API this skill doesn't cover and point them at the Share Links docs in the Rankscale help center. Don't guess at its paths.
