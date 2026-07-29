@@ -64,9 +64,22 @@ The API sits at `https://rankscale.ai/v1/...` on the marketing domain. Using `ht
 
 Because both arrive as unparseable text, always capture the HTTP status alongside the body (`curl -w '%{http_code}'` or `-i`) on heavy calls — otherwise a retryable 502 gets misread as a broken integration.
 
-## 7. Param name inconsistency: `brandId` vs `brandRef`
+## 7. Param name inconsistency: `brandId` vs `brandRef` — it splits *within* the search-term endpoints
 
-Most endpoints use **`brandId`**. The exception: `GET /v1/metrics/topics?brandRef=<id>` — topics use `brandRef`. Same value, different key. Easy to mistype; the response will be `{success:false, error:{code:"validation_error"}}` if you use the wrong one for that endpoint.
+Same value, different key, and it's not a clean per-resource split. The full confirmed map (2026-07-29 docs):
+
+| Call | Key |
+|---|---|
+| All four reporting endpoints (`/report`, `/citations`, `/sentiment`, `/search-terms-report`) | `brandId` |
+| `GET /v1/metrics/search-terms?brandId=` | `brandId` |
+| **`POST` / `PATCH /v1/metrics/search-terms`** (body) | **`brandRef`** |
+| `GET /v1/metrics/topics?brandRef=` | `brandRef` |
+| `POST` / `PATCH /v1/metrics/topics` (body) | `brandRef` |
+| Brand paths `/v1/metrics/brands/{brandId}` | `brandId` |
+
+So **the search-term endpoints use both**: you list with `brandId` but create and patch with `brandRef`. Listing a brand's terms and then creating one in the same script means switching keys mid-flow — the most likely place to get this wrong.
+
+Using the wrong key on a **GET** returns `{success:false, error:{code:"validation_error"}}`. On a **POST/PATCH body** it's worse: the unknown key is accepted, lands in `warnings[]`, and the required key is reported missing — so read `warnings` (quirk 1), not just the error.
 
 ## 8. Reporting endpoints are POST, not GET
 
@@ -154,3 +167,58 @@ Two separate traps, both verified 2026-07-29 on one brand.
 **Web-grounded vs training-data sentiment are separate sources.** Each entry carries `hasWebGrounding` and `hasTrainingData` booleans with parallel `webGrounding*` / `trainingData*` blocks. A brand can be `hasWebGrounding: true, hasTrainingData: false` (observed), in which case the `trainingData*` buckets exist but are empty — don't report `0` sentiment from training data as a finding when the source simply didn't contribute. `webGroundingSentimentByEngine[<engineId>]` is `{sum, count, avg}`, so per-engine sentiment is `avg` — don't re-derive it.
 
 **Two arrays, different scopes:** `brandSentiments[]` is the tracked brand only (typically one entry); `companySentiments[]` is every detected brand including the own brand (`isOwnBrand: true`) — 38 entries on the test brand. For competitor sentiment comparisons use `companySentiments`. The undocumented `brandSentimentsBySearchTerm[]` / `companySentimentsBySearchTerm[]` give the same cuts per search term.
+
+## 20. List endpoints default to `limit=1000` and truncate silently
+
+`GET /brands`, `GET /search-terms`, and `GET /topics` each take a `limit` query param — integer, min 1, **max 5000, default 1000**. There is **no cursor, offset, or page token**: `limit` is the only lever, and the response carries no "there's more" flag (unlike `/citations`, which at least has `paginationInfo.hasMore`).
+
+So on a workspace with more than 1,000 search terms, `GET /search-terms?brandId=X` returns exactly 1,000 and looks complete. Any count, coverage audit, or "how many terms do we track" answer built on the default is wrong with no visible symptom.
+
+**Practical guidance:** pass `limit=5000` explicitly on list calls whenever the count matters. If a list comes back at exactly 1000 (or 5000), treat that as a truncation signal, not a coincidence — say so rather than reporting it as the total. Above 5,000 records the API cannot enumerate them in one call at all; fall back to filtered reporting endpoints or the dashboard.
+
+## 21. `POST /search-terms/{id}/run` — the envelope lies, and creates default to inactive
+
+Two things about the write path that cost credits.
+
+**The outer `success` is not the run result.** The docs say it outright: *"The envelope is successful even when the term-level result failed; inspect `data.success` and `data.results`."* So a `200` with `{"success": true, ...}` can wrap a completely failed execution. The real result:
+
+```
+data: {success, duplicate, totalRequested, successCount, failureCount, skippedCount,
+       results[]: {searchTermId, success, executionId, error}}
+```
+
+**Never report a run as successful off the envelope.** Check `data.success`, then `data.failureCount` / `data.skippedCount`, then surface `results[].error` verbatim when non-zero. `data.duplicate: true` means the run was recognized as a repeat — flag it rather than presenting it as a fresh execution. Also note `/run` wants a body (`--data '{}'`), not a bodyless POST.
+
+**Creating a search term does *not* start it.** `SearchTermCreateRequest.status` defaults to **`inactive`**, so `POST /search-terms` provisions without scheduling runs or burning credits. That makes create-then-review-then-activate the safe flow. Conversely, passing `status: "active"` at create time *does* schedule runs immediately — treat it as the same class of action as `/activate` and confirm it with the user. Creating an active term on a deprecated engine is blocked with `400 deprecated_engine`.
+
+## 22. `brandInfo` has a different shape on input than on output
+
+You cannot round-trip a brand. `GET /brands` returns:
+
+```json
+"brandInfo": {"names": ["Acme", "Acme Inc"], "productNames": ["Widget"], "description": "..."}
+```
+
+…an **object** with `names` / `productNames`. But `BrandCreateRequest` / `BrandPatchRequest` expect:
+
+```json
+"brandInfo": [{"brands": ["Acme", "Acme Inc"], "products": ["Widget"]}]
+```
+
+…an **array** of objects with `brands` / `products`. Different container *and* different key names.
+
+So the read-modify-write pattern — fetch a brand, tweak one alias, PATCH the object back — fails: the `{names, productNames}` object goes in as unrecognized fields, lands in `warnings[]`, and the alias update silently does nothing while the call returns `200`. **Translate the shape explicitly**, and re-read the brand afterwards to confirm the aliases actually changed. Aliases drive detection (quirk 3), so a silently-dropped update quietly suppresses the brand's metrics.
+
+## 23. `brandRef: ""` on a topic PATCH detaches it — and the docs' example ships that value
+
+`PATCH /v1/metrics/topics/{topicId}` moves a topic between brands via `brandRef`. Per the docs: *"Providing an empty `brandRef` detaches the topic and clears the stored `myBrand` string."*
+
+The trap: the API reference's own example payload for this endpoint is
+
+```json
+{"name": "", "description": "", "keywords": "", "brandRef": ""}
+```
+
+Copy that verbatim to rename a topic and you detach it from its brand. A detached topic stops being a usable `selectedTopic` filter and drops out of the brand's operational topics list, so reporting cuts built on it silently return nothing.
+
+**Send only the keys you intend to change.** To rename, PATCH `{"name": "New name"}` — omit `brandRef` entirely. Never pass an empty string as filler. This applies to the other PATCH bodies too: the docs' examples are field-complete templates with empty-string placeholders, not safe starting points.

@@ -149,7 +149,7 @@ The response carries two runway views: `runway` (detailed simulation, bounded �
 3. For each timestamp: rank = `1 + (count of competitors with strictly greater visibilityScore that day)`.
 4. A day where own `visibilityScore` is 0 (brand not detected) → rank `null`; don't rank it among detected brands. Untracked days (no executions) → leave as gaps; never interpolate.
 
-**Per-topic table** (the common ask): get topics via `GET /v1/metrics/topics?brandRef=<id>`, then one filtered `/report` per topic. Present `Topic | Brand Rank (by Visibility) | Visibility Index`, where **Visibility Index = `ownBrandMetrics.visibilityScore`**.
+**Per-topic table** (the common ask): get topics via `GET /v1/metrics/topics?brandRef=<id>&limit=5000` (note `brandRef`, and raise `limit` off its 1000 default), then one filtered `/report` per topic. Present `Topic | Brand Rank (by Visibility) | Visibility Index`, where **Visibility Index = `ownBrandMetrics.visibilityScore`**.
 
 **Caveats — state these when reporting:**
 - **Aggregate ≠ average of daily.** The aggregate rank is period-weighted share-of-voice, so a brand can be aggregate rank 1 yet daily rank 2 on most days (quirk 17). Don't reconcile them.
@@ -162,9 +162,19 @@ The response carries two runway views: `runway` (detailed simulation, bounded �
 
 PATCH, DELETE, and the activate/deactivate/run actions modify the user's live Rankscale workspace. Before any write call, **state in plain language what will happen and to which item, then wait for explicit confirmation**. Example: *"I'll deactivate search term IZFBct… (\"best running shoes for flat feet\") on the Acme brand. This stops it from running until reactivated. Proceed?"*
 
-The `run` action on a search term costs credits — always show the user the current `analysisCredits` balance and a rough cost estimate (each run typically consumes a handful of credits across multiple AI engines) before triggering.
+The `run` action on a search term costs credits — always show the user the current `analysisCredits` balance and a rough cost estimate (each run typically consumes a handful of credits across multiple AI engines) before triggering. **Creating a search term with `status: "active"` schedules runs immediately** — treat it as the same class of action as `/activate` and confirm it the same way. The default is `inactive`, so plain provisioning is safe.
 
-Exact request bodies for create/update calls aren't fully documented. The robust pattern: POST with the obvious required field (e.g., `name`), read the validation error to learn what else is required, build up from there. See `references/endpoints.md` for what we've confirmed.
+Full request bodies for every create/update call are documented in `references/endpoints.md` — read it rather than probing. Five things to get right:
+
+- **`brandRef`, not `brandId`, in search-term and topic bodies** — even though `GET /search-terms` filters by `brandId`. Both keys live in the same endpoint family (quirks §7).
+- **`POST /brands` requires `url` as well as `name`.** Both are min-length-1 strings.
+- **`brandInfo` doesn't round-trip.** Output is `{names[], productNames[]}`; input is `[{brands[], products[]}]`. Feeding the response shape back in silently does nothing (quirks §22).
+- **Never send empty-string placeholders.** `brandRef: ""` on a topic PATCH *detaches* it — and the docs' own example payload contains exactly that. Send only the keys you're changing (quirks §23).
+- **Check `data.success` on `/run`, not the envelope.** A `200` with `success: true` can wrap a failed execution; read `data.failureCount` and `results[].error` (quirks §21).
+
+After any write, re-read the affected resource and confirm the change landed — unrecognized fields are accepted, reported only in `warnings[]`, and return `200`.
+
+**On list calls, pass `limit=5000` when the count matters.** `/brands`, `/search-terms`, and `/topics` default to `limit=1000` with no pagination and no "more results" flag, so a large workspace truncates silently (quirks §20).
 
 ## When the API returns an error
 

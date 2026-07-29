@@ -242,47 +242,120 @@ Note the inconsistent casing in the Gemini Pro IDs (`_Pro`, capital P) versus ev
 
 ---
 
+## Workspace endpoints — the `limit` param
+
+All three list endpoints (`/brands`, `/search-terms`, `/topics`) take a `limit` query param: integer, **min 1, max 5000, default 1000**. There is no cursor or offset — `limit` is the only control, so a workspace with more than 1,000 records of a kind gets a silently truncated list unless you raise it. See quirks §20.
+
+Create calls return **`201`** with `data: {id}`. Patch calls return `200` with `data: {id}`. Delete calls return `200` with `data: {id, deleted: true}`.
+
+---
+
 ## Brands
 
-### GET `/v1/metrics/brands` — list brands
+### GET `/v1/metrics/brands?limit=1000` — list brands
 
 Returns `data.brands[]`:
 ```
-{id, name, brandInfo: {names[], productNames[], description}, description, url,
- additionalDomains[], createdAt, operationalTopics[], operationalSearchTerms[], ...}
+id, name, description, url, additionalDomains[], createdAt
+brandInfo: {names[], productNames[], description}     # NOTE: output shape ≠ input shape (quirks §22)
+defaultCountry, defaultLanguage
+syncSchedules: {daily: {hour}, weekly: {weekday}, monthly: {dayOfMonth}}
+operationalTopics[]:      {topicId, name, addedAt}
+operationalSearchTerms[]: {searchTermId}
 ```
 
 ### POST `/v1/metrics/brands` — create a brand
 
-Service-level validation requires at least `name`. Probe for additional required/optional fields by sending a minimal body and reading the 400/422 response.
+Body (`BrandCreateRequest`). Enforces plan brand limits (`400 limit_reached`).
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | string, **required** | min length 1 |
+| `url` | string, **required** | min length 1 — *also required; the skill previously listed only `name`* |
+| `description` | string | |
+| `additionalDomains` | string[] | UI shows a `…15` cap next to this field — treat 15 as a likely max, unconfirmed |
+| `brandInfo` | **array** of `{brands[], products[]}` | `BrandInfoInput[]` — **not** the `{names, productNames}` shape the GET returns (quirks §22) |
+| `defaultCountry` | string, default `us` | |
+| `defaultLanguage` | string, default `en` | |
+| `insightsEnabled` | boolean, default `true` | |
+| `syncSchedules` | object, nullable | `daily.hour` 0–23 · `weekly.weekday` `mon`…`sun` · `monthly.dayOfMonth` **1–28** (not 31) |
+
+Returns `201` `{id}`.
 
 ### PATCH `/v1/metrics/brands/{brandId}` — update a brand
 
-Body: partial brand object. Confirm with user before calling.
+Body (`BrandPatchRequest`): every `BrandCreateRequest` field, all optional (`name`, `url`, `description`, `additionalDomains`, `brandInfo`, `defaultCountry`, `defaultLanguage`, `insightsEnabled`, `syncSchedules`). "Partially updates public brand fields. Internal identifiers and ownership fields cannot be overwritten." Confirm with the user before calling.
 
 ### DELETE `/v1/metrics/brands/{brandId}` — delete a brand
 
-No body. **Destructive — always confirm with user, naming the brand explicitly.**
+No body. Per the docs it "deletes a brand owned by the workspace and **detaches or deactivates related records**" — so topics and search terms are cascaded, not orphaned. Returns `{id, deleted: true}`.
+
+**Destructive — always confirm with user, naming the brand explicitly, and say that its topics and search terms are detached/deactivated too.**
 
 ---
 
 ## Search terms
 
-### GET `/v1/metrics/search-terms?brandId={brandId}` — list
+### GET `/v1/metrics/search-terms?brandId={brandId}&limit=1000` — list
 
-Returns `data.searchTerms[]` with `{id, term, aiSearchEngines[], status, ...}`.
+`brandId` **required** (this endpoint uses `brandId`; the POST/PATCH bodies use `brandRef` — see quirks §7). Returns `data.searchTerms[]`:
+
+```
+id, term, aiSearchEngines[], status, executionsAmount
+interval, region, websearch
+createdAt, lastExecutionTime, nextScheduledExecutionTime    # the two times may be null
+searchTermTopicRef: {id, name}
+```
 
 ### POST `/v1/metrics/search-terms` — create
+
+Body (`SearchTermCreateRequest`). Resolves `myBrand` from `brandRef`, adds the term to the brand's operational search terms, and optionally links a topic.
+
+| Field | Type | Notes |
+|---|---|---|
+| `brandRef` | string, **required** | **`brandRef`, not `brandId`** (quirks §7) |
+| `term` | string, **required** | the query text |
+| `status` | enum, **default `inactive`** | `active` \| `inactive` — created paused unless you opt in (quirks §21) |
+| `aiSearchEngines` | string[] | engine IDs |
+| `interval` | enum | `hourly` \| `daily` \| `weekly` \| `monthly` \| `manual` |
+| `intervalEveryN` | integer enum, default 1 | **only `1` or `2`** |
+| `executionLimit` | number \| null | |
+| `websearch` | boolean, default `false` | web-grounded behavior where the engine supports it |
+| `tags` | string[] | |
+| `competitors` | array | |
+| `description` | string | |
+| `language` | string \| null | |
+| `region` | string \| null | |
+| `region_string` | string \| null | **snake_case** — the one exception in an otherwise camelCase API |
+
+Returns `201` `{id}`. Creating an **active** term on a deprecated engine is blocked with `400 deprecated_engine`.
+
 ### PATCH `/v1/metrics/search-terms/{id}` — update
+
+Body (`SearchTermPatchRequest`): all of the above, all optional (including `brandRef`, `term`, `status`). Returns `200`.
+
 ### DELETE `/v1/metrics/search-terms/{id}` — delete (confirm first)
+
+Returns `{id, deleted: true}`.
 
 ### POST `/v1/metrics/search-terms/{id}/activate` — resume scheduled runs
 
-No body. Errors with `400 deprecated_engine` if any attached engine is retired.
+No body. "Activates a search term and schedules the next run when applicable." Returns `{id, status}`. Errors with `400 deprecated_engine` if any attached engine is retired.
 
 ### POST `/v1/metrics/search-terms/{id}/deactivate` — pause
 
+No body. Returns `{id, status}`.
+
 ### POST `/v1/metrics/search-terms/{id}/run` — trigger immediate run
+
+**Takes a body — an empty object `{}`** (`--data '{}'`), not a bodyless POST. Runs the term through the shared backend execution pipeline.
+
+```
+data: {success, duplicate, totalRequested, successCount, failureCount, skippedCount,
+       results[]: {searchTermId, success, executionId, error}}
+```
+
+**The envelope lies here.** The docs are explicit: *"The envelope is successful even when the term-level result failed; inspect `data.success` and `data.results`."* A `200` with outer `success: true` can still be a failed run — see quirks §21.
 
 **Costs credits.** Show the user `analysisCredits` balance and confirm.
 
@@ -290,17 +363,38 @@ No body. Errors with `400 deprecated_engine` if any attached engine is retired.
 
 ## Topics
 
-### GET `/v1/metrics/topics?brandRef={brandId}` — list topics for a brand
+### GET `/v1/metrics/topics?brandRef={brandId}&limit=1000` — list topics for a brand
 
-Note the param name is **`brandRef`** here, not `brandId`. Returns `data.topics[]` with `{id, name, description, brandRef, myBrand, keywords, searchTermIds[], createdAt, createdBy, ...}`.
+Note the param name is **`brandRef`** here, not `brandId`. Returns `data.topics[]`:
+
+```
+id, name, description, keywords          # keywords is a STRING, not an array
+brandRef, myBrand                        # myBrand may be null
+searchTermIds[], createdBy, createdAt, updatedAt
+```
 
 ### POST `/v1/metrics/topics` — create
 
+Body (`TopicCreateRequest`). Resolves `myBrand` from `brandRef` and updates the brand's operational topics list.
+
+| Field | Type | Notes |
+|---|---|---|
+| `brandRef` | string, **required** | min length 1 |
+| `name` | string, **required** | min length 1 |
+| `description` | string | |
+| `keywords` | string | a string, not an array |
+
+Returns `201` `{id}`.
+
 ### PATCH `/v1/metrics/topics/{id}` — update or **move to another brand**
 
-The docs note that topics can be moved between brands via PATCH — pass a different `brandRef` (or equivalent field) in the body. The exact field name isn't quoted in the docs we have; probe with a small payload first.
+Body (`TopicPatchRequest`): `name`, `description`, `keywords`, `brandRef`. Moving a topic between brands is confirmed to be a `brandRef` change — brand operational-topic lists are kept in sync automatically and `myBrand` is refreshed.
+
+**⚠ `brandRef: ""` detaches the topic** from its brand and clears `myBrand`. The docs' own example payload ships `"brandRef": ""` — copying it verbatim silently detaches. Omit the key entirely when you only mean to rename. See quirks §23.
 
 ### DELETE `/v1/metrics/topics/{id}` — delete (confirm first)
+
+Returns `{id, deleted: true}`.
 
 ---
 
