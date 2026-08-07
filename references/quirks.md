@@ -34,11 +34,27 @@ Two ways to handle it:
 
 Option 2 is more defensive — if Rankscale ever fixes the off-by-one, option 1 silently starts dropping a day. Prefer client-side slicing and always sanity-check that the first and last timestamps in the response match what the user asked for.
 
+**On `/citations` (and any window-aggregate endpoint), option 2 is unavailable.** `/citations` returns aggregates over the window with no per-day array to slice, so compensating the end date (option 1) is the *only* way to control the window. Verified 2026-08-07: requesting `2026-07-01` → `2026-07-30` returned citations whose `firstSeenAt`/`lastSeenAt` spanned `2026-07-02` … `2026-07-30`, a clean July. Use the per-URL `firstSeenAt` / `lastSeenAt` fields (quirk 13b) to confirm the window you actually got — they are the only window echo the endpoint provides.
+
+**The extra day only materialises if an execution actually ran on it.** A brand on an every-other-day schedule requesting `2026-06-01` → `2026-06-30` came back ending `2026-06-30` (no run on 07-01), while `2026-07-01` → `2026-07-31` came back ending `2026-08-01` (a run did happen). So the off-by-one can look absent on one window and present on the next — never conclude it's been fixed from a single clean result.
+
 ## 2. `includeNotFoundExecutions` controls whether absent-brand runs count
 
 When set to `false`, the metrics only include executions where the brand was actually detected in the AI answer. When `true`, all executions count, even ones where the brand wasn't found. The default (when omitted) is unclear — **pass it explicitly** to avoid surprises.
 
-The daily historical data also includes a `brandNotFound[]` parallel array of booleans (one per timestamp). When `true` for most days, the brand isn't being directly named in AI responses even though metrics still get computed from topic/search-term coverage. **Surface this to the user** — it usually means the alias list (`brandInfo.names`) is incomplete or the tracked search terms don't naturally elicit the brand's name. The fix is in the Rankscale dashboard, not in the API call.
+### `brandNotFound[]` is not "the brand was not found" — do not report it as a finding
+
+The daily historical data includes a `brandNotFound[]` parallel array of booleans (one per timestamp). **An earlier revision of this document described it as meaning the brand isn't being named in AI responses, and told you to surface it with an alias-list fix. That is wrong and produces a false finding.**
+
+Verified 2026-08-07 on a brand with 23 topics / 200 search terms: `brandNotFound` was `true` on **all 15 buckets across two consecutive months**, while over the same buckets `detectionRate` ran 63–70% and `mentions` ran 102–126 per bucket. A brand generating 1,800+ mentions a month is self-evidently being named.
+
+The flag behaves like **"at least one execution in this bucket did not surface the brand"** — which is trivially `true` for any brand whose detection rate is below 100%, i.e. almost every brand. It carries no information at the bucket level.
+
+**Practical guidance:**
+- Treat `brandNotFound` as a **non-signal**. Do not report "the brand wasn't found" off it.
+- `detectionRate` is the real measure of how often the brand surfaces. Read that instead, and read its *direction* over the window.
+- Only investigate aliases (quirk 3) when `detectionRate` is genuinely low or falling — never on the strength of `brandNotFound` alone.
+- If you ever observe `brandNotFound: true` alongside `detectionRate: 0` and `mentions: 0`, that is a real absent-brand bucket. That combination, not the flag by itself, is the thing worth surfacing.
 
 ## 3. Aliases drive matching
 
@@ -103,7 +119,21 @@ Read `X-RateLimit-Remaining` from response headers and slow down before it hits 
 
 ## 13b. `/citations` response shape — `occurrences` is the count, not `citations`
 
-In the `/citations` response, `citationsByDomain[]` entries look like `{domain, occurrences, citations}` but **`citations` is the array of URL objects, not a number** — the per-domain count is `occurrences`, and `data.totalCitations` equals the sum of all `occurrences`. Citation share = `occurrences / totalCitations`. Top URLs come from flattening every domain's URL array (`{url, occurrences}`) and sorting by `occurrences`.
+In the `/citations` response, `citationsByDomain[]` entries look like `{domain, occurrences, citations}` but **`citations` is the array of URL objects, not a number** — the per-domain count is `occurrences`, and `data.totalCitations` equals the sum of all `occurrences`. Citation share = `occurrences / totalCitations`. Top URLs come from flattening every domain's URL array and sorting by `occurrences`.
+
+**Each URL object carries more than `{url, occurrences}`** (verified 2026-08-07) — the full shape is:
+
+```
+{url, normalizedUrl, occurrences, engineAppearances: {<engineId>: count},
+ firstSeenAt, lastSeenAt, category, searchTerms: [{id, …}]}
+```
+
+Three of these are load-bearing and easy to miss:
+- **`engineAppearances`** is a per-engine citation count for that single URL. Summing it across a domain's URLs gives per-engine citation totals for that domain — the only way to answer "which engines cite our site." There is no top-level per-engine citation breakdown.
+- **`firstSeenAt` / `lastSeenAt`** are the only echo of the window actually returned (see quirk 1b).
+- **`normalizedUrl`** still leaves `www.` / trailing-slash / query-string variants distinct. For page-level analysis, normalise further or a single page splits across several entries — on one brand, 141 raw URLs collapsed to 114 real pages.
+
+**`category: "owned"` does NOT mean owned by the tracked brand.** It marks *a company's own website* as opposed to a portal, directory, or editorial site — so every competitor's own domain carries it too. Verified 2026-08-07: ~100 distinct domains per month carried `category: "owned"`, including the tracked brand's site and all of its competitors' sites side by side. Never use it to isolate the user's own properties — match on the known domain instead. Same class of trap as `topDomainsByCompetitor` below.
 
 Two more gotchas in `domainSummary`:
 - `topDomainsByOwnBrandCitations` (domains that cite the tracked brand) and `topDomainsByCompetitor` are **capped at 20 / 10 entries** respectively. Don't treat them as complete.
@@ -134,7 +164,9 @@ If a workspace member generates an API key, all reads and writes operate on the 
 
 ## 15. API keys are workspace-scoped — "Unauthorized access to brand" means wrong workspace
 
-An API key (`rk_<hash>_<brandId>`) only reaches brands in the workspace that issued it. If `/report` (or any brand call) returns `bad_request` / `"Unauthorized access to brand"` **while `/credits` succeeds**, the key is valid but the brand lives in a different account/workspace — you have the wrong key for that brand, not a malformed request. Confirm which account owns the brand. (The Rankscale MCP connector authenticates separately and may be bound to a different account than `RANKSCALE_API_KEY`, so one surface can see a brand the other can't.)
+**The key suffix is a workspace ID, not a brand ID.** Earlier revisions of this document described the format as `rk_<hash>_<brandId>`. That is wrong. The real shape is `rk_<hash>_<workspaceId>` — verified 2026-08-07 on two live keys, both 23 characters (`rk_` + 8 + `_` + 11). Two proofs: the suffix is 11 characters while Rankscale brand IDs are 20 (Firestore-style, e.g. `AbC1dEfGhIjKlMnOpQrS`), and a single key returned **7 different brands** from `GET /brands`, which a brand-scoped key could not do. Never try to parse a brand ID out of the key.
+
+An API key only reaches brands in the workspace that issued it. If `/report` (or any brand call) returns `bad_request` / `"Unauthorized access to brand"` **while `/credits` succeeds**, the key is valid but the brand lives in a different account/workspace — you have the wrong key for that brand, not a malformed request. Confirm which account owns the brand. (The Rankscale MCP connector authenticates separately and may be bound to a different account than `RANKSCALE_API_KEY`, so one surface can see a brand the other can't.)
 
 ## 16. `competitorTimeSeriesData` excludes the own brand
 
@@ -222,3 +254,50 @@ The trap: the API reference's own example payload for this endpoint is
 Copy that verbatim to rename a topic and you detach it from its brand. A detached topic stops being a usable `selectedTopic` filter and drops out of the brand's operational topics list, so reporting cuts built on it silently return nothing.
 
 **Send only the keys you intend to change.** To rename, PATCH `{"name": "New name"}` — omit `brandRef` entirely. Never pass an empty string as filler. This applies to the other PATCH bodies too: the docs' examples are field-complete templates with empty-string placeholders, not safe starting points.
+
+## 24. Competitor entities split and merge between windows — this manufactures phantom movers
+
+`competitorMetrics[]` and `competitorTimeSeriesData` key competitors by **display name**, and those names are not stable across windows. Rankscale's entity resolution changes between months, so the same real-world company can appear as one entry in one window and two in another. Verified 2026-08-07 comparing two consecutive months on one brand:
+
+| Window | Entries | Visibility |
+|---|---|---|
+| June | `Acme` **and** `Acme Group` (two separate entries) | 10.4 + 6.5 = 16.9 |
+| July | `Acme Group` (one entry) | 16.7 |
+
+Compared naively that reads as **+157% growth for the fastest-rising competitor in the market**. The company was actually flat-to-slightly-down. It was the single largest apparent mover in the dataset and it was entirely an artifact.
+
+Three distinct failure modes, all seen in the same pair of months:
+- **Merge across windows** — `Acme` + `Acme Group` → `Acme Group`.
+- **Case-only variants across windows** — `Beta Estates` (June) vs `Beta estates` (July). A `Set`/`Map` keyed on the raw name reports these as one EXITED and one NEW brand.
+- **Duplicates co-existing inside a single window** — `GammaCorp` *and* `Gamma Corp` both present in July; `Delta` and `Delta.com` both present in both months. Each splits that company's true visibility, which also distorts Brand Rank (recipe §6) by inflating the pool.
+
+**Before reporting any month-over-month competitor comparison:**
+1. Normalise names before matching — lowercase and strip non-alphanumerics (`s => s.toLowerCase().replace(/[^a-z0-9]/g, '')`).
+2. After normalising, list every collapsed key that came from more than one source name, and every ENTERED/EXITED brand. Inspect that list by eye — a brand that "entered" at high visibility next to one that "exited" at similar visibility is a rename or a merge, not market movement.
+3. When an entity merged, compare the **summed** prior-window value against the current one, and say in the output that you did.
+4. Never present a top-mover list straight from raw name matching. The largest apparent movers are the most likely to be artifacts, because merges concentrate visibility.
+
+Recommend the user clean duplicate entities in the dashboard — until then, competitor rankings carry a known error bar.
+
+## 25. Undocumented series in the `/report` response
+
+Three things the response returns that the upstream docs and earlier revisions of this skill did not mention (verified 2026-08-07):
+
+**`ownBrandMetrics.engineMetricsData.<aggregation>`** — a per-engine daily time series, same array-parallel shape as `topicMetricsData`:
+
+```
+[{engineId, engineName, visibilityScore[], sentiment[], avgPosition[], detectionRate[], …}, …]
+```
+
+This is the only way to see per-engine movement over time without one filtered `/report` call per engine, and on a month-over-month comparison it was the highest-value cut in the whole response — it exposed a ~14-point visibility swing between engines that the window aggregate completely hid. Reach for it whenever the user asks "which AI engines".
+
+**Two extra daily bucket arrays.** The `historicalData.<agg>` bucket list also includes **`sources`** and **`citationCounts`**, beyond the documented `visibilityScore` / `sentiment` / `mentions` / `citations` / `avgPosition` / `detectionRate` / `top3` / `brandNotFound`.
+
+**`hourly` / `weekly` / `monthly` keys exist but are empty** on `topicMetricsData` and `engineMetricsData` when you request `aggregation: "daily"` — they come back as `[]`, not absent. An `Object.keys()` presence check will wrongly conclude the data is there. Check `.length`, and read the sub-key matching the `aggregation` you actually requested.
+
+## 26. Unconfirmed observations — verify before relying on these
+
+Seen once, on one brand, cause not established. Recorded so they aren't rediscovered from scratch; **do not present either as fact to a user.**
+
+- **The `sources` daily array is mostly zeros.** Across two months only the final 2–3 buckets carried non-zero values, the rest were `0` — while the window-aggregate `sources` figure looked plausible and moved sensibly (190 → 233). Superficially similar to the competitor backfill truncation (quirk 16b) but a different array and a much shorter tail. Consequence: a `sources` daily chart would be almost entirely false, and a month-over-month `sources` delta cannot be corroborated day-by-day. Treat the aggregate as soft and don't plot the series until this is understood.
+- **`citations` dips sharply in the last few buckets of every window.** June ended 100 / 87 / 74 off a ~150–170 plateau; July ended 144 / 90. Consistent across both months at the window edge, which points to a windowing artifact rather than real end-of-month behaviour — but two windows is not enough to rule out a genuine monthly pattern. **Test:** request a window ending mid-month and check whether the dip follows the window edge or the calendar date. Until then, treat small month-over-month citation deltas (single-digit %) as noise.

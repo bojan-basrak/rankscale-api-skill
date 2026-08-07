@@ -11,7 +11,7 @@ This skill calls the REST API directly so the user (an SEO professional, not a d
 
 ## Setup
 
-- **API key**: Read from environment variable `RANKSCALE_API_KEY`. Key format is `rk_<hash>_<brandId>`. If unset, ask the user to set it once: PowerShell `setx RANKSCALE_API_KEY "rk_..."` (new shell required to take effect) or pass per-session with `$env:RANKSCALE_API_KEY = "rk_..."`. **Never** print the key in responses or write it into files.
+- **API key**: Read from environment variable `RANKSCALE_API_KEY`. Key format is `rk_<hash>_<workspaceId>` — the suffix is a **workspace** identifier, not a brand ID, so one key reaches every brand in its workspace (quirks §15). If unset, ask the user to set it once: PowerShell `setx RANKSCALE_API_KEY "rk_..."` (new shell required to take effect) or pass per-session with `$env:RANKSCALE_API_KEY = "rk_..."`. **Never** print the key in responses or write it into files.
 - **Base URL**: `https://rankscale.ai` (note: no `/api` prefix — the path is `/v1/...` directly on the marketing domain).
 - **Auth header**: `Authorization: Bearer $RANKSCALE_API_KEY`.
 - **Rate limit**: 200 requests per minute per API key. The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` (seconds until window resets) — read them with `curl -i` if you're doing batch work. Cache reporting responses for 5–10 min when possible.
@@ -33,9 +33,13 @@ Save raw JSON responses to a file next to the user's work (typically `Rankscale/
 | Endpoint | Window | Size |
 |---|---|---|
 | `/report` (filtered) | 30d | ~40–50 KB |
+| `/report` (filtered) | 1 calendar month | ~105–110 KB |
 | `/citations` | 3m | ~3.9 MB |
+| `/citations` **`uncapped: true`** | 1 calendar month | **~4.4–5.7 MB** |
 | `/sentiment` | 30d | ~9 MB |
 | `/sentiment` | 3m | ~17 MB |
+
+**Size does not scale with window length** — `uncapped: true` matters far more. A single uncapped month came back *larger* than a capped three-month pull, so don't extrapolate a 1-month size from the 3m row.
 
 `/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6).
 
@@ -104,17 +108,26 @@ Optional reporting filters (all accept a single string, an array for OR-within-f
 - `userTimezone` — IANA tz like `Europe/Berlin` for user-local day boundaries
 - `includeNotFoundExecutions` — boolean, controls whether the "brand not found in answer" executions count toward the metrics (see quirks.md)
 
-Read the response from `data.ownBrandMetrics.historicalData.<aggregation>` (e.g. `.daily` when you asked for `aggregation: "daily"`). Each bucket array — `visibilityScore`, `sentiment`, `mentions`, `citations`, `avgPosition`, `detectionRate`, `top3`, `brandNotFound` — runs in parallel with `timestamps`. Per-topic and per-competitor time series live in `data.ownBrandMetrics.topicMetricsData.<aggregation>` and `data.competitorTimeSeriesData.<aggregation>`.
+Read the response from `data.ownBrandMetrics.historicalData.<aggregation>` (e.g. `.daily` when you asked for `aggregation: "daily"`). Each bucket array — `visibilityScore`, `sentiment`, `mentions`, `sources`, `citations`, `citationCounts`, `avgPosition`, `detectionRate`, `top3`, `brandNotFound` — runs in parallel with `timestamps`.
+
+Three parallel time series sit alongside it:
+- `data.ownBrandMetrics.topicMetricsData.<aggregation>` — per topic
+- `data.ownBrandMetrics.engineMetricsData.<aggregation>` — **per engine**; undocumented upstream, and usually the highest-value cut when a window aggregate looks flat, because engine-level moves cancel each other out in the total (quirks §25)
+- `data.competitorTimeSeriesData.<aggregation>` — per competitor, own brand excluded (quirks §16)
+
+`brandNotFound[]` is a **non-signal** — it reads `true` for essentially any brand with sub-100% detection. Use `detectionRate` instead and never report "brand not found" off the flag (quirks §2).
 
 Present a metrics table with these columns: Date, Visibility, Sentiment, Mentions, Citations, Avg Position, Detection %, Top-3 %. Above it, show the snapshot summary (current snapshot values from `ownBrandMetrics` + the `trends` delta).
 
-**Brand Rank (by Visibility) — vs. competitors.** Compute this from `data.competitorMetrics[]` (which includes the own brand, flagged `isOwnBrand: true`): rank = `1 + (count of entries with strictly greater visibilityScore)` — ties don't push the brand down. This reproduces the dashboard's rank. The response also carries `latestRank`/`avgRank` per entry, but treat any ready-made rank field with suspicion and verify against the UI — the MCP's equivalent `own_brand_rank` is always `1` (a display pin), so don't trust rank fields blind; the visibility-sorted computation is the method that matched the dashboard in testing. The shared filters (`selectedEngine`, `selectedTopic`, `selectedTags`, `selectedQuery`) work per-cut, so you can rank within a single engine, topic, tag, or query by re-running filtered. Note `competitorMetrics` entries may carry a different `validMetricsCount` than the own brand (competitor baselines use a wider window) — the ordering still matches the UI. **Full recipe — including daily rank over time and its caveats — in recipe §6 below.**
+**Brand Rank (by Visibility) — vs. competitors.** Compute this from `data.competitorMetrics[]` (which includes the own brand, flagged `isOwnBrand: true`): rank = `1 + (count of entries with strictly greater visibilityScore)` — ties don't push the brand down. This reproduces the dashboard's rank. The response also carries `latestRank`/`avgRank` per entry — **these are not ranks.** Verified 2026-08-07: they return non-integer values (`latestRank: 2.7`, `avgRank: 2.9`) for a brand whose computed rank was 1, so they track something position-like, not an ordinal. Ignore them. The MCP's equivalent `own_brand_rank` is likewise always `1` (a display pin). The visibility-sorted computation above is the method that matched the dashboard in testing. The shared filters (`selectedEngine`, `selectedTopic`, `selectedTags`, `selectedQuery`) work per-cut, so you can rank within a single engine, topic, tag, or query by re-running filtered. Note `competitorMetrics` entries may carry a different `validMetricsCount` than the own brand (competitor baselines use a wider window) — the ordering still matches the UI. **Full recipe — including daily rank over time and its caveats — in recipe §6 below.**
 
 ### 3. Citation analytics
 
 `/v1/metrics/citations` returns which sources (sites, articles) AI models cite when answering the user's search terms. Useful for understanding which third-party domains influence AI answers about a brand.
 
-Key fields: `data.totalCitations`, `data.uniqueCitations` (distinct URLs), `data.uniqueDomains`, and `data.citationsByDomain[]` (every domain). In each domain entry, **`occurrences` is the count; the `citations` field is the array of URLs, not a number** — so citation share = `occurrences / totalCitations`, and top URLs come from flattening each domain's URL array and sorting by `occurrences`. `data.domainSummary` has pre-cut views (`topDomainsOverall`, `topDomainsByEngine`, `topDomainsByQuery`, `topDomainsByOwnBrandCitations`, `topDomainsByCompetitor`) — but these are capped (≈20/10 entries) and `topDomainsByCompetitor` lists domains where a *competitor was mentioned* (includes neutral third-party sites like Reddit/Booking), so don't use it to identify competitor-*owned* sites. See quirks.md §13b.
+Key fields: `data.totalCitations`, `data.uniqueCitations` (distinct URLs), `data.uniqueDomains`, and `data.citationsByDomain[]` (every domain). In each domain entry, **`occurrences` is the count; the `citations` field is the array of URLs, not a number** — so citation share = `occurrences / totalCitations`, and top URLs come from flattening each domain's URL array and sorting by `occurrences`.
+
+Each URL object is `{url, normalizedUrl, occurrences, engineAppearances: {<engineId>: count}, firstSeenAt, lastSeenAt, category, searchTerms[]}`. **`engineAppearances` is the only per-engine citation breakdown in the API** — sum it across a domain's URLs to answer "which engines cite our site." `firstSeenAt`/`lastSeenAt` are the only echo of the window you actually got. Normalise `normalizedUrl` further before page-level analysis (it leaves `www.`/trailing-slash/query variants distinct), and note **`category: "owned"` means "a company's own site", not owned by the tracked brand** — competitors carry it too. See quirks.md §13b. `data.domainSummary` has pre-cut views (`topDomainsOverall`, `topDomainsByEngine`, `topDomainsByQuery`, `topDomainsByOwnBrandCitations`, `topDomainsByCompetitor`) — but these are capped (≈20/10 entries) and `topDomainsByCompetitor` lists domains where a *competitor was mentioned* (includes neutral third-party sites like Reddit/Booking), so don't use it to identify competitor-*owned* sites. See quirks.md §13b.
 
 **Check the caps before calling a list complete.** The response caps at **5,000 unique URLs** and **50 brands** by default. `data.paginationInfo` reports the truth — `citationsCapped`, `brandsCapped`, `responseTrimmed`, `capBypassed`, `maxCitations`, `maxBrands`, `totalCount` vs `returnedCount`. Pass **`uncapped: true`** (body or query param) to lift the URL cap; it does not lift the 50-brand cap or the response-size guard. `deduplicated: true` deduplicates response paths and adds `data.searchTermsById`. If any cap flag is `true`, tell the user and narrow the window or filter rather than presenting a truncated list as the full picture. See quirks.md §13c.
 
@@ -158,6 +171,23 @@ The response carries two runway views: `runway` (detailed simulation, bounded �
 - **Cross-surface note.** If computing this via the Rankscale MCP instead of the API, ignore its `own_brand_rank` field — it is always `1` (a display pin), not a ranking.
 - When a rank surprises you, cross-check the dashboard UI before trusting it.
 
+### 7. Month-over-month comparison
+
+The most common reporting ask, and the one where traps compound. Run this checklist.
+
+**Getting comparable windows:**
+1. Use explicit `isoStartDate`/`isoEndDate` per month, not `timeFrame` + `periodOffset` — calendar months aren't 30 days.
+2. **Compensate the exclusive end date** (quirks §1b): for July pass `2026-07-01` → `2026-07-30`. On `/report` you can instead slice client-side; on `/citations` you cannot, so compensating is the only option.
+3. **Verify the returned span before comparing anything.** On `/report` read the sliced `timestamps[]`; on `/citations` read `firstSeenAt`/`lastSeenAt`. Drop any bucket outside the intended month.
+4. **Check the execution counts match.** Brands run on a schedule (often every *other* day, ~15 runs/month — not daily). Two months with equal run counts make raw totals directly comparable; unequal counts mean you must compare rates, not totals. Say which you did.
+
+**Interpreting the deltas:**
+5. **Compare against the pool, not just the prior value.** A brand's citations rising 18% while the total citation pool rose 12.5% is a ~5.5pp real gain, not an 18% one. Always pull `data.totalCitations` for both months and report **share** alongside the raw delta.
+6. **Normalise competitor names before matching** and inspect every ENTERED/EXITED entity for merges and renames (quirks §24). The biggest apparent mover is the most likely artifact.
+7. **Cross-check the aggregate against the daily series.** They can disagree in direction (quirks §17) — `avgPosition` did exactly that in testing. When they disagree, say so and call the metric flat rather than picking whichever supports the story.
+8. **Use `engineMetricsData` and `topicMetricsData`, not just the headline.** A flat window aggregate routinely hides double-digit swings in opposite directions across engines and topics — that's usually the actual finding.
+9. **Cross-reference citations against visibility per engine.** They can move in *opposite* directions on the same engine (observed: ChatGPT visibility −5.1 while owned-domain citations +120%; Gemini 3.0 Flash visibility +11.8 while citations −36%). Visibility measures mention share; citations measure whether the brand's own site was the source. A visibility gain with a citation drop means the engine is discussing the brand while sourcing third parties — a materially weaker win, and worth flagging as such.
+
 ## Workspace writes — confirm before acting
 
 PATCH, DELETE, and the activate/deactivate/run actions modify the user's live Rankscale workspace. Before any write call, **state in plain language what will happen and to which item, then wait for explicit confirmation**. Example: *"I'll deactivate search term IZFBct… (\"best running shoes for flat feet\") on the Acme brand. This stops it from running until reactivated. Proceed?"*
@@ -196,4 +226,5 @@ Send `X-Request-Id` (any string you choose) when you want a correlation ID echoe
 - **Round metric numbers to 1 decimal** unless the user asks for raw values.
 - **Convert timestamps** to plain dates (YYYY-MM-DD) in user-facing output.
 - **Reference the saved JSON file** in your response (e.g., "Full data in [Rankscale/acme_report.json](Rankscale/acme_report.json)") so the user can ask follow-ups against it.
-- **Flag the `brandNotFound` quirk** in the report response when present — see quirks.md.
+- **Do not report `brandNotFound` as a finding.** It reads `true` for almost every brand and means nothing on its own; cite `detectionRate` instead (quirks §2).
+- **State the caveat next to the number, not in a footnote.** Most of the traps in quirks.md change what a figure *means* rather than invalidating it — a reader who sees "+18%" without "the whole pool grew 12.5%" has been misled even though the number is right.
