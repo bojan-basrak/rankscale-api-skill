@@ -291,13 +291,33 @@ Three things the response returns that the upstream docs and earlier revisions o
 
 This is the only way to see per-engine movement over time without one filtered `/report` call per engine, and on a month-over-month comparison it was the highest-value cut in the whole response — it exposed a ~14-point visibility swing between engines that the window aggregate completely hid. Reach for it whenever the user asks "which AI engines".
 
-**Two extra daily bucket arrays.** The `historicalData.<agg>` bucket list also includes **`sources`** and **`citationCounts`**, beyond the documented `visibilityScore` / `sentiment` / `mentions` / `citations` / `avgPosition` / `detectionRate` / `top3` / `brandNotFound`.
+**Two extra daily bucket arrays.** The `historicalData.<agg>` bucket list also includes **`sources`** and **`citationCounts`**, beyond the documented `visibilityScore` / `sentiment` / `mentions` / `citations` / `avgPosition` / `detectionRate` / `top3` / `brandNotFound`. Read quirk 26 before using `sources` — outside the trailing few buckets of the requested window it is structurally `0`, not measured.
 
 **`hourly` / `weekly` / `monthly` keys exist but are empty** on `topicMetricsData` and `engineMetricsData` when you request `aggregation: "daily"` — they come back as `[]`, not absent. An `Object.keys()` presence check will wrongly conclude the data is there. Check `.length`, and read the sub-key matching the `aggregation` you actually requested.
 
-## 26. Unconfirmed observations — verify before relying on these
+## 26. The last ~3 buckets of any window are computed differently — `citations` under-counts, `sources` populates only there
 
-Seen once, on one brand, cause not established. Recorded so they aren't rediscovered from scratch; **do not present either as fact to a user.**
+**Confirmed 2026-08-07.** The same calendar dates return *different* values for `citations` and `sources` depending on which window you requested them in. Two overlapping `/report` calls on one brand, `aggregation: "daily"`:
 
-- **The `sources` daily array is mostly zeros.** Across two months only the final 2–3 buckets carried non-zero values, the rest were `0` — while the window-aggregate `sources` figure looked plausible and moved sensibly (190 → 233). Superficially similar to the competitor backfill truncation (quirk 16b) but a different array and a much shorter tail. Consequence: a `sources` daily chart would be almost entirely false, and a month-over-month `sources` delta cannot be corroborated day-by-day. Treat the aggregate as soft and don't plot the series until this is understood.
-- **`citations` dips sharply in the last few buckets of every window.** June ended 100 / 87 / 74 off a ~150–170 plateau; July ended 144 / 90. Consistent across both months at the window edge, which points to a windowing artifact rather than real end-of-month behaviour — but two windows is not enough to rule out a genuine monthly pattern. **Test:** request a window ending mid-month and check whether the dip follows the window edge or the calendar date. Until then, treat small month-over-month citation deltas (single-digit %) as noise.
+| Date | `citations` in a 07-01→07-14 window | `citations` in a full-July window | `sources` short | `sources` full |
+|---|---|---|---|---|
+| 2026-07-02 | 121 | 121 ✓ | 0 | 0 ✓ |
+| 2026-07-04 | 113 | 113 ✓ | 0 | 0 ✓ |
+| 2026-07-06 | 118 | 118 ✓ | 0 | 0 ✓ |
+| 2026-07-08 | 143 | 143 ✓ | 0 | 0 ✓ |
+| **2026-07-10** | **121** | **130** | **22** | **0** |
+| **2026-07-12** | **77** | **118** | **83** | **0** |
+| **2026-07-14** | **83** | **160** | **95** | **0** |
+
+The first four buckets match exactly; **the last three buckets of the requested window disagree** — and they are the last three of the *window*, not of the month. This settles the earlier open question: the trailing citation dip is a **windowing artifact, not real end-of-month behaviour**.
+
+Both previously-separate observations are the same effect. `citations` is *under-counted* in the trailing ~3 buckets; `sources` is *only populated* in those same buckets and reads `0` everywhere else. That is why a full-month `sources` series looks like a row of zeros with a few values glued to the end — those aren't the only days with sources, they're just the only days near the window edge.
+
+**Critically, this does not affect the core metrics.** In the same comparison, `visibilityScore`, `mentions`, and `detectionRate` were **identical in every overlapping bucket** (0 of 7 differed). The artifact is confined to `citations` and `sources`.
+
+**Practical guidance:**
+- **Never read the last ~3 buckets of a `citations` or `sources` daily series.** Drop them, or request a window extending a few buckets past the period you actually care about and slice back.
+- **Never plot the `sources` daily series at all** until this is understood — outside the window edge it is structurally zero, not measured-zero.
+- A trailing decline in a citations chart is almost certainly this artifact. Check it against a longer window before reporting it as a trend.
+- `visibilityScore` / `mentions` / `detectionRate` are window-stable — trust those series to the edge.
+- **Window-level aggregates and the `/citations` endpoint were not tested here.** For month-over-month work this matters less than it looks: if both months are pulled with identical window geometry, any systematic edge effect applies to both and largely cancels in the comparison. Keep the geometry identical and say that you did.

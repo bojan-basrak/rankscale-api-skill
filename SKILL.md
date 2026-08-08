@@ -115,7 +115,9 @@ Three parallel time series sit alongside it:
 - `data.ownBrandMetrics.engineMetricsData.<aggregation>` — **per engine**; undocumented upstream, and usually the highest-value cut when a window aggregate looks flat, because engine-level moves cancel each other out in the total (quirks §25)
 - `data.competitorTimeSeriesData.<aggregation>` — per competitor, own brand excluded (quirks §16)
 
-`brandNotFound[]` is a **non-signal** — it reads `true` for essentially any brand with sub-100% detection. Use `detectionRate` instead and never report "brand not found" off the flag (quirks §2).
+Two bucket-array traps:
+- `brandNotFound[]` is a **non-signal** — it reads `true` for essentially any brand with sub-100% detection. Use `detectionRate` instead and never report "brand not found" off the flag (quirks §2).
+- **The last ~3 buckets of `citations[]` and `sources[]` are window-dependent, not real** — `citations` under-counts there and `sources` populates *only* there. Drop them, and never plot `sources` daily at all. `visibilityScore`, `mentions`, and `detectionRate` are window-stable to the edge (quirks §26).
 
 Present a metrics table with these columns: Date, Visibility, Sentiment, Mentions, Citations, Avg Position, Detection %, Top-3 %. Above it, show the snapshot summary (current snapshot values from `ownBrandMetrics` + the `trends` delta).
 
@@ -185,6 +187,7 @@ The most common reporting ask, and the one where traps compound. Run this checkl
 5. **Compare against the pool, not just the prior value.** A brand's citations rising 18% while the total citation pool rose 12.5% is a ~5.5pp real gain, not an 18% one. Always pull `data.totalCitations` for both months and report **share** alongside the raw delta.
 6. **Normalise competitor names before matching** and inspect every ENTERED/EXITED entity for merges and renames (quirks §24). The biggest apparent mover is the most likely artifact.
 7. **Cross-check the aggregate against the daily series.** They can disagree in direction (quirks §17) — `avgPosition` did exactly that in testing. When they disagree, say so and call the metric flat rather than picking whichever supports the story.
+7b. **Discard the last ~3 buckets of any `citations`/`sources` series before comparing** — they're window artifacts and will fake a month-end decline (quirks §26). Keeping the two months' window geometry identical makes the effect cancel; say that you did.
 8. **Use `engineMetricsData` and `topicMetricsData`, not just the headline.** A flat window aggregate routinely hides double-digit swings in opposite directions across engines and topics — that's usually the actual finding.
 9. **Cross-reference citations against visibility per engine.** They can move in *opposite* directions on the same engine (observed: ChatGPT visibility −5.1 while owned-domain citations +120%; Gemini 3.0 Flash visibility +11.8 while citations −36%). Visibility measures mention share; citations measure whether the brand's own site was the source. A visibility gain with a citation drop means the engine is discussing the brand while sourcing third parties — a materially weaker win, and worth flagging as such.
 
