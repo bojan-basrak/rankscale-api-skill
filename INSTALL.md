@@ -24,7 +24,9 @@ On Windows, `~` resolves to `%USERPROFILE%`, so this lands at
 **Other tools** — put the folder wherever your tool loads skills or custom
 instructions from (for example, a project-level rules/instructions folder), or
 simply open the repo in your workspace and point your agent at `SKILL.md`. You
-should see `SKILL.md` and a `references/` folder inside.
+should see `SKILL.md` and a `references/` folder inside. See
+[Per-tool setup](#per-tool-setup) below for concrete recipes for Codex, Cursor,
+Windsurf, Aider, and web-only assistants.
 
 **Download instead of clone:** use the repo's green **Code ▸ Download ZIP**
 button and unzip to the same location.
@@ -56,6 +58,83 @@ Open your agent in any working directory and ask:
 It should call the API and show your brands as a table. If it asks for your API
 key, the env var didn't take — re-check step 2.
 
+## Per-tool setup
+
+Step 2 (the API key) is the same everywhere. This section only covers *where the
+files go* for tools that don't auto-discover skills the way Claude Code does.
+
+### OpenAI Codex CLI
+
+Codex auto-loads `AGENTS.md` from your project root.
+
+**Option A — single project:** put `rankscale-api-skill/` somewhere in your
+project (e.g. `docs/rankscale/`), then add to your existing `AGENTS.md`:
+
+```markdown
+## Rankscale API
+When working with the Rankscale brand-visibility API, follow `docs/rankscale/SKILL.md`
+and consult `docs/rankscale/references/endpoints.md` and
+`docs/rankscale/references/quirks.md` as needed.
+```
+
+**Option B — dedicated:** if the project has no `AGENTS.md` yet, copy `SKILL.md`
+to the project root and rename it `AGENTS.md`. Codex picks it up automatically.
+Copy the `references/` folder alongside it.
+
+### Cursor
+
+Place the folder in your project, then create `.cursor/rules/rankscale.mdc`:
+
+```markdown
+---
+description: Rankscale brand-visibility API instructions
+globs:
+alwaysApply: false
+---
+
+@docs/rankscale/SKILL.md
+@docs/rankscale/references/endpoints.md
+@docs/rankscale/references/quirks.md
+```
+
+### Windsurf
+
+Add the folder to your workspace's context paths, or attach `SKILL.md` to a chat
+with *"Use this to call the Rankscale API."*
+
+### Aider
+
+Aider has no auto-discovery convention but reads whatever you point it at:
+
+```bash
+aider \
+  --read rankscale-api-skill/SKILL.md \
+  --read rankscale-api-skill/references/endpoints.md \
+  --read rankscale-api-skill/references/quirks.md \
+  <your-other-files>
+```
+
+Or append the contents to your project's `CONVENTIONS.md`, which Aider
+auto-loads when present.
+
+### Web-only assistants (ChatGPT, Gemini, Claude.ai)
+
+No filesystem, so paste instead of install:
+
+1. Copy the whole of `SKILL.md`.
+2. Start a new conversation and paste it as the first message, prefixed with
+   *"Use the following instructions when I ask about Rankscale or AI
+   brand-visibility tracking."*
+3. When the conversation needs deeper endpoint detail or hits a quirk, paste the
+   relevant section of `references/endpoints.md` or `references/quirks.md`.
+
+Where the platform supports file attachments — Claude.ai Projects, ChatGPT
+custom GPTs with knowledge files, Gemini Gems — attach `SKILL.md` and both
+`references/*.md` files so they persist across the conversation.
+
+Note that a web assistant can't run `curl`, so it can only tell you *what* to
+call, not call it. For actual data pulls you need one of the tools above.
+
 ## What the skill can do
 
 - **Reporting**: visibility, sentiment, mentions, citations, avg. position, detection rate, top-3 rate
@@ -75,7 +154,8 @@ key, the env var didn't take — re-check step 2.
 ## Trouble?
 
 - **"Skill not triggering"**: try mentioning *"Rankscale"* explicitly in your prompt; restart your agent if you just installed it.
-- **HTTP 401/403**: API key is wrong, expired, or REST access isn't activated yet.
+- **HTTP 401**: API key is missing, wrong, expired, or REST access isn't activated yet.
+- **HTTP 403 / "Unauthorized access to brand"**: the key is valid but belongs to a *different workspace* than the brand you're querying. Keys are workspace-scoped — if you have more than one Rankscale account, check you're using the right key.
 - **HTTP 404 with HTML body**: check the URL path is `/v1/...` not `/api/v1/...` (the skill handles this, but worth knowing if you build something custom).
 
 ## Disclaimer
