@@ -24,6 +24,8 @@ Still verify the window independently, because `warnings` only catches *unrecogn
 
 The full canonical body schema for `/report` is in `endpoints.md`.
 
+**Same failure mode, a recognized field: `searchTermId` is silently ignored on `/report`.** It is a real field name (the GET `/search-terms` family uses it), so it doesn't look like a typo — but on `/report` the API drops it, adds `"Ignored unrecognized field 'searchTermId'"` to `warnings[]`, and returns the **whole unfiltered workspace**. Verified 2026-08-26. A clean-looking `200` then answers a far broader question than you asked. To filter `/report` to a single search term, use `selectedQuery` with the exact query string instead.
+
 ## 1b. `isoEndDate` is exclusive (off-by-one)
 
 When you pass `isoStartDate` + `isoEndDate` for a custom range, the API treats `isoEndDate` as **exclusive** — it returns data up to and including the day *after*. Asking for `2026-04-01` → `2026-05-25` returns 56 days ending `2026-05-26`. Asking for `2026-04-01` → `2026-05-24` returns 55 days ending `2026-05-25`.
@@ -321,3 +323,35 @@ Both previously-separate observations are the same effect. `citations` is *under
 - A trailing decline in a citations chart is almost certainly this artifact. Check it against a longer window before reporting it as a trend.
 - `visibilityScore` / `mentions` / `detectionRate` are window-stable — trust those series to the edge.
 - **Window-level aggregates and the `/citations` endpoint were not tested here.** For month-over-month work this matters less than it looks: if both months are pulled with identical window geometry, any systematic edge effect applies to both and largely cancels in the comparison. Keep the geometry identical and say that you did.
+
+## 27. `timeFrame` presets and ISO dates disagree — always pass ISO dates
+
+Verified 2026-08-26 on one workspace: `timeFrame: "3m"` and the equivalent `isoStartDate` / `isoEndDate` pair resolved to the **same span** (identical weekly buckets, same 10 grouped competitors) yet returned **different aggregates and a different competitor set**.
+
+| | `3m` preset | ISO dates | Dashboard |
+|---|---|---|---|
+| Competitor entries | 28 | 22 | 22 |
+| Example competitor visibility | 46.3 | **62.7** | 62.7 |
+| Example competitor detection | 55.9 | **76.2** | 76.2 |
+
+Only the ISO form matched the dashboard UI — exactly, across visibility, detection, top-3, and sentiment on every competitor checked. Root cause unknown: the preset appears to resolve a different underlying execution set than its own reported span implies.
+
+**Rule: convert every user-facing window to explicit `isoStartDate` + `isoEndDate` and never send a `timeFrame` preset for numbers a user will see.** Presets are acceptable only for a throwaway "is there any data at all" probe. Mind the exclusive end date (quirk 1b) when converting.
+
+## 28. `competitorMetrics[]` is truncated unless you filter by query
+
+Unfiltered, `/report` returned only 22 competitor entries; the identical call filtered to a single search term with `selectedQuery` returned 64. The unfiltered `competitorMetrics[]` is a **summarised** view, not the full detected roster.
+
+To get the complete competitor set, run one `/report` per search term (each with its own `selectedQuery`) and union the `competitorMetrics[]` results, normalising names first (quirk 24). Verified 2026-08-26: doing this across 7 search terms surfaced 440 entities and 668 aliases covering ~92% of roster appearances, versus the couple-dozen the unfiltered call showed.
+
+**Consequence for Brand Rank (SKILL.md §6):** a pool size taken from one unfiltered call understates the true pool, so it is a lower bound. Call the rank "of the summarised set" unless you unioned per-query results.
+
+## 29. `/search-terms-report` returns raw per-execution detections — no brand grouping
+
+Whatever entity consolidation the workspace applies (merging `Acme` and `Acme Group`, case variants, and so on), `/search-terms-report` does **not** apply it — it returns raw per-execution brand detections. `/report`'s `competitorMetrics[]` is grouped (see `groupMeta`, endpoints.md); `/search-terms-report` is not. Don't match competitor names across the two endpoints without normalising and grouping yourself (quirk 24). Verified 2026-08-26.
+
+`includeNotFoundExecutions` is silently ignored here too — it is a `/report`-only field, and on `/search-terms-report` it lands in `warnings[]` and changes nothing.
+
+## 30. When the API and dashboard disagree, refresh the dashboard first
+
+Observed 2026-08-26: an API figure that disagreed with the dashboard came into line after the dashboard was hard-refreshed — the dashboard had been serving a cached value, not the API being wrong. Before concluding the API is off, have the user refresh the relevant dashboard view and re-compare. This is distinct from the preset-vs-ISO divergence in quirk 27, where the API genuinely returns different numbers by request shape.

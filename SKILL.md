@@ -9,6 +9,16 @@ Rankscale is an AI brand-visibility tracking tool. It prompts various AI models 
 
 This skill calls the REST API directly so the user (an SEO professional, not a developer) can pull data into reports, charts, and custom analyses without clicking through the dashboard.
 
+## Staying current — sync from GitHub first
+
+**The canonical source of this skill is its GitHub repo, `https://github.com/bojan-basrak/rankscale-api-skill`. Any local copy is a mirror.** Before using the skill, refresh the local copy from origin so you never run a stale version. The folder to sync is the git clone this `SKILL.md` was loaded from — on Claude Code that is `~/.claude/skills/rankscale-api-skill/`.
+
+```bash
+git -C ~/.claude/skills/rankscale-api-skill pull --ff-only
+```
+
+If the pull fails — offline, local uncommitted edits, or a diverged history — tell the user the local copy may be stale, then continue with the local version. Never `git reset --hard` or force anything to make the pull go through; a failed sync is a warning, not a blocker.
+
 ## Setup
 
 - **API key**: Read from environment variable `RANKSCALE_API_KEY`. Key format is `rk_<hash>_<workspaceId>` — the suffix is a **workspace** identifier, not a brand ID, so one key reaches every brand in its workspace (quirks §15). If unset, ask the user to set it once: PowerShell `setx RANKSCALE_API_KEY "rk_..."` (new shell required to take effect) or pass per-session with `$env:RANKSCALE_API_KEY = "rk_..."`. **Never** print the key in responses or write it into files.
@@ -38,10 +48,11 @@ Save raw JSON responses to a file next to the user's work (typically `Rankscale/
 | `/citations` **`uncapped: true`** | 1 calendar month | **~4.4–5.7 MB** |
 | `/sentiment` | 30d | ~9 MB |
 | `/sentiment` | 3m | ~17 MB |
+| `/search-terms-report` **`includeAnswerTexts: true`** | 3m | **~8.5 MB** (63 terms, 2,065 executions) |
 
 **Size does not scale with window length** — `uncapped: true` matters far more. A single uncapped month came back *larger* than a capped three-month pull, so don't extrapolate a 1-month size from the 3m row.
 
-`/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6).
+`/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. `/search-terms-report` with `includeAnswerTexts: true` is the same class (≈8.5 MB over a 3-month window); write it to a file too. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6).
 
 ```bash
 # Bash (Git Bash / WSL / macOS / Linux)
@@ -87,12 +98,13 @@ Most reporting endpoints need a `brandId`. When the user names a brand ("show me
 
 ### 2. Pull metrics for a brand over a window
 
-The user almost always asks for a time window. Use `timeFrame` (camelCase, capital F — **the API silently ignores any other spelling**) with one of these documented presets: `24h`, `7d`, `30d`, `3m`, `1y`. Pair it with `aggregation` (`hourly`, `daily`, `weekly`, or `monthly`) for the bucket size. For custom windows, use `isoStartDate` + `isoEndDate` (paired ISO date strings); these override `timeFrame`.
+The user almost always asks for a time window. **Always express it with `isoStartDate` + `isoEndDate` (paired ISO date strings) — never a `timeFrame` preset.** A preset and the ISO dates covering the same span return *different* aggregates and even different competitor sets; only the ISO form matches the dashboard (quirks §27). Convert the user's window to explicit dates first, remembering that `isoEndDate` is exclusive (quirks §1b). Pair the dates with `aggregation` (`hourly`, `daily`, `weekly`, or `monthly`) for the bucket size. Both date keys are camelCase-strict — the API silently drops any other spelling into `warnings[]` (quirks §1). The presets (`24h`, `7d`, `30d`, `3m`, `1y`) still exist; use them only for a throwaway "is there any data" probe, never for numbers a user will see.
 
 ```json
 {
   "brandId": "<id>",
-  "timeFrame": "30d",
+  "isoStartDate": "2026-05-01",
+  "isoEndDate": "2026-06-01",
   "aggregation": "daily",
   "includeNotFoundExecutions": true
 }
@@ -103,8 +115,8 @@ Optional reporting filters (all accept a single string, an array for OR-within-f
 - `selectedTags` — tag, `__UNTAGGED__`, or array
 - `selectedEngine` — engine ID (preferred — see `references/endpoints.md` for the catalog) or friendly name
 - `selectedQuery` — exact search-term query string or array
-- `searchTermId` — single search-term ID
-- `periodOffset` — integer, shifts the preset window back N periods (0 = current, 1 = previous, …)
+- `searchTermId` — **ignored on `/report`**: the API drops it into `warnings[]` and returns the whole workspace. To filter to one search term, use `selectedQuery` with the exact query string instead (quirks §1).
+- `periodOffset` — integer, shifts the preset window back N periods (0 = current, 1 = previous, …). Tied to `timeFrame` presets, so avoid it — use explicit ISO windows instead.
 - `userTimezone` — IANA tz like `Europe/Berlin` for user-local day boundaries
 - `includeNotFoundExecutions` — boolean, controls whether the "brand not found in answer" executions count toward the metrics (see quirks.md)
 
@@ -167,6 +179,7 @@ The response carries two runway views: `runway` (detailed simulation, bounded �
 **Per-topic table** (the common ask): get topics via `GET /v1/metrics/topics?brandRef=<id>&limit=5000` (note `brandRef`, and raise `limit` off its 1000 default), then one filtered `/report` per topic. Present `Topic | Brand Rank (by Visibility) | Visibility Index`, where **Visibility Index = `ownBrandMetrics.visibilityScore`**.
 
 **Caveats — state these when reporting:**
+- **The unfiltered pool is truncated.** An unfiltered `/report` returns a summarised `competitorMetrics[]` (a couple of dozen entries), not the full detected roster. Filtering by a single `selectedQuery` returns far more (quirk 28). So a pool size taken from one unfiltered call is a floor — call the rank "of the summarised set" unless you unioned per-query results.
 - **Aggregate ≠ average of daily.** The aggregate rank is period-weighted share-of-voice, so a brand can be aggregate rank 1 yet daily rank 2 on most days (quirk 17). Don't reconcile them.
 - **~2-week competitor backfill.** `competitorTimeSeriesData` only carries competitor values for roughly the trailing ~2 weeks of the window — earlier buckets are 0 for every competitor, so daily ranks there are spurious rank-1s (quirk 16b). Null-out (don't zero) those older values and caption the truncation; window aggregates stay valid.
 - **Low-visibility lower bound.** `competitorTimeSeriesData` carries a smaller competitor set (~25–35) than the full detected pool in `competitorMetrics` (dozens). For a deep long-tail brand the daily rank is a *lower bound* — a competitor absent from the series could outrank it on a given day. Flag it.

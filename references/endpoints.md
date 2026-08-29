@@ -43,7 +43,7 @@ Body (`MetricsReportRequest`):
 | Field | Type | Notes |
 |---|---|---|
 | `brandId` | string, required | The brand to report on |
-| `timeFrame` | enum string | `24h`, `7d`, `30d`, `3m`, `1y` |
+| `timeFrame` | enum string | `24h`, `7d`, `30d`, `3m`, `1y`. **Avoid for user-facing numbers — presets disagree with the equivalent ISO window and the dashboard; use `isoStartDate`+`isoEndDate` (quirks §27).** |
 | `aggregation` | enum string | `hourly`, `daily`, `weekly`, `monthly` — bucket size for time series |
 | `periodOffset` | integer, default 0 | Shifts the preset window back; 0=current, 1=previous, … |
 | `isoStartDate` | string | Custom range start. Paired with `isoEndDate`. Overrides `timeFrame`+`periodOffset`. |
@@ -53,8 +53,8 @@ Body (`MetricsReportRequest`):
 | `selectedTags` | string \| string[] | Tag, `__UNTAGGED__`, array, or `"all"` |
 | `selectedEngine` | string \| string[] | Engine ID (preferred) or friendly name, array, or `"all"` |
 | `selectedQuery` | string \| string[] | Exact search-term query, array, or `"all"` |
-| `searchTermId` | string | Single search-term filter |
-| `includeNotFoundExecutions` | boolean | Whether executions where the brand wasn't found count toward metrics |
+| `searchTermId` | string | **Ignored on `/report`** — dropped to `warnings[]`, returns the whole workspace. Filter with `selectedQuery` instead (quirks §1). |
+| `includeNotFoundExecutions` | boolean | Whether executions where the brand wasn't found count toward metrics. `/report` only — ignored on `/search-terms-report`. |
 | `showLastRunMetrics` | boolean | Include the latest single-run snapshot alongside the window |
 
 Response (`data` object, observed shape):
@@ -74,8 +74,10 @@ data.ownBrandMetrics:
   engineMetricsData: similar shape, per AI engine
   preselectionWhitelist[], preselectionBlacklist[], manualWhitelist[], manualBlacklist[]
 
-data.competitorMetrics[]:
-  name, isOwnBrand, latestValue, trend, variations[],
+data.competitorMetrics[]:                # grouped/summarised — TRUNCATED unless filtered by query (quirks §28)
+  name, isOwnBrand, latestValue, trend,
+  variations[],                          # array of STRINGS — union of raw name variants for a grouped entry
+  groupMeta: {id, name, members[]},      # present ONLY on grouped entities; undocumented upstream
   visibilityScore, latestRank, avgRank, avgSentiment, appearances,
   citationCount, detectionRate, top3, validMetricsCount
 
@@ -89,12 +91,16 @@ Example:
 curl -X POST https://rankscale.ai/v1/metrics/report \
   -H "Authorization: Bearer $RANKSCALE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"brandId":"brand_abc123","timeFrame":"30d","aggregation":"daily","includeNotFoundExecutions":true}'
+  -d '{"brandId":"brand_abc123","isoStartDate":"2026-05-01","isoEndDate":"2026-06-01","aggregation":"daily","includeNotFoundExecutions":true}'
 ```
+
+(Uses ISO dates, not a `timeFrame` preset — see quirks §27.)
 
 ### POST `/v1/metrics/search-terms-report` — per-search-term snapshots
 
-Same shared filters. Supports `includeAnswerTexts: true` to include the raw AI answer text for each execution (heavier payload).
+Same shared filters. Supports `includeAnswerTexts: true` to include the raw AI answer text for each execution — a **much** heavier payload (~8.5 MB over a 3-month window for 63 terms / 2,065 executions); always `-o` to a file.
+
+**No brand grouping.** Unlike `/report`'s grouped `competitorMetrics[]`, this endpoint returns **raw per-execution brand detections** with no entity consolidation — normalise and group names yourself before matching against `/report` output (quirks §29). `includeNotFoundExecutions` is a `/report`-only field and is ignored here (lands in `warnings[]`).
 
 Response (`data`):
 
@@ -185,9 +191,9 @@ searchTermsById       # only with deduplicated: true
 All four reporting endpoints accept the same time-window and filter fields.
 
 **Time windows:**
-- `timeFrame`: preset window. `24h | 7d | 30d | 3m | 1y`
-- `periodOffset`: integer, moves the preset N periods into the past
-- `isoStartDate` + `isoEndDate`: custom range (paired). Overrides `timeFrame`/`periodOffset`.
+- `isoStartDate` + `isoEndDate`: custom range (paired). **Prefer this for everything user-facing** — presets return different numbers for the same span (quirks §27). Overrides `timeFrame`/`periodOffset`. `isoEndDate` is exclusive (quirks §1b).
+- `timeFrame`: preset window. `24h | 7d | 30d | 3m | 1y`. Probe use only — see quirks §27.
+- `periodOffset`: integer, moves the preset N periods into the past. Tied to presets, so avoid it; use an explicit ISO window instead.
 - `aggregation`: `hourly | daily | weekly | monthly`
 - `userTimezone`: IANA tz string
 
@@ -196,7 +202,7 @@ All four reporting endpoints accept the same time-window and filter fields.
 - `selectedTags` — tag, `__UNTAGGED__`, array, or `"all"`
 - `selectedEngine` — engine ID, array, or `"all"` (prefer IDs over friendly names)
 - `selectedQuery` — exact query string, array, or `"all"`
-- `searchTermId` — single search-term ID
+- `searchTermId` — single search-term ID. **Ignored on `/report`** (dropped to `warnings[]`, returns the whole workspace) — use `selectedQuery` there instead (quirks §1).
 
 ---
 

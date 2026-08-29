@@ -28,8 +28,11 @@ should see `SKILL.md` and a `references/` folder inside. See
 [Per-tool setup](#per-tool-setup) below for concrete recipes for Codex, Cursor,
 Windsurf, Aider, and web-only assistants.
 
-**Download instead of clone:** use the repo's green **Code ▸ Download ZIP**
-button and unzip to the same location.
+**Prefer `git clone` over a ZIP download.** The GitHub repo is the canonical
+source, and the skill keeps itself current by running `git pull --ff-only` on its
+own folder before each use. That self-update only works on a git checkout — a ZIP
+copy will silently go stale. You can still **Code ▸ Download ZIP** if you can't use
+git, but then you must re-download to get updates.
 
 ## 2 — Set your API key as an environment variable
 
@@ -149,7 +152,7 @@ call, not call it. For actual data pulls you need one of the tools above.
 
 - The skill saves full JSON responses into a `Rankscale/` folder in your current working directory, so you can ask follow-up questions or build charts without re-calling the API.
 - Destructive actions (delete, deactivate, run-now which costs credits) always ask before executing.
-- Server-side date filtering works reliably when parameters are cased correctly (`timeFrame`, `isoStartDate`/`isoEndDate`). Always sanity-check that the returned window matches what you asked for.
+- For any window a report will show, use explicit `isoStartDate`/`isoEndDate` dates rather than a `timeFrame` preset — presets can return different numbers than the matching ISO window and the dashboard. Always sanity-check that the returned window matches what you asked for.
 
 ## Trouble?
 

@@ -66,6 +66,11 @@ git clone https://github.com/bojan-basrak/rankscale-api-skill.git \
 For other tools, place the folder wherever that tool loads skills or custom
 instructions from (or just open the repo and point your agent at `SKILL.md`).
 
+**This repo is the canonical source.** Any installed copy is a mirror. The skill
+tells the agent to `git pull --ff-only` its own folder before each use, so a clone
+kept as a git checkout stays current on its own — `git clone` it (don't download a
+zip) so that self-update works.
+
 Then set your API key as an environment variable:
 
 ```bash
@@ -90,7 +95,7 @@ setx RANKSCALE_API_KEY "rk_your_key_here"
 ## Limitations
 
 - **Paid plans only.** REST API access is available on Rankscale's Agency Growth and Enterprise plans. If you don't have an `rk_` key, the skill can't do anything — ask the Rankscale team to enable it.
-- **The API may change without notice.** Rankscale now publishes an official OpenAPI 3.1.0 reference for the Metrics API (help center → Metrics API, signed-in only); this skill is reconciled against it and filled in with hands-on probing where the spec is loose or silent. Last reconciled against the **2026-07-29** docs revision, with a live field-testing pass on **2026-08-07** that corrected two documented behaviors (the `brandNotFound` flag and the API-key format) and added several undocumented response fields. Endpoints, field names, engine IDs, and behaviors do shift — if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
+- **The API may change without notice.** Rankscale now publishes an official OpenAPI 3.1.0 reference for the Metrics API (help center → Metrics API, signed-in only); this skill is reconciled against it and filled in with hands-on probing where the spec is loose or silent. Last reconciled against the **2026-07-29** docs revision, with live field-testing passes on **2026-08-07** (corrected the `brandNotFound` flag and the API-key format, added several undocumented response fields) and **2026-08-26** (found that `timeFrame` presets disagree with ISO windows, that unfiltered `competitorMetrics[]` is truncated, and documented the `groupMeta` field). Endpoints, field names, engine IDs, and behaviors do shift — if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
 - **No live validation here.** Nothing in this repo is tested against your account. Always sanity-check that returned time windows and numbers match what you asked for before trusting a report.
 - **Rate limits apply.** 200 requests/min per key; the skill caches and batches, but heavy ad-hoc use can hit the ceiling.
 
