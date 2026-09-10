@@ -221,7 +221,7 @@ data: {success, duplicate, totalRequested, successCount, failureCount, skippedCo
        results[]: {searchTermId, success, executionId, error}}
 ```
 
-**Never report a run as successful off the envelope.** Check `data.success`, then `data.failureCount` / `data.skippedCount`, then surface `results[].error` verbatim when non-zero. `data.duplicate: true` means the run was recognized as a repeat — flag it rather than presenting it as a fresh execution. Also note `/run` wants a body (`--data '{}'`), not a bodyless POST.
+**Never report a run as successful off the envelope.** Check `data.success`, then `data.failureCount` / `data.skippedCount`, then surface `results[].error` verbatim when non-zero. `data.duplicate: true` means the run was recognized as a repeat — flag it rather than presenting it as a fresh execution. Also note `/run` wants a body (`--data '{}'`), not a bodyless POST. For the async 502 behavior and the per-term execution lock, see quirk 31.
 
 **Creating a search term does *not* start it.** `SearchTermCreateRequest.status` defaults to **`inactive`**, so `POST /search-terms` provisions without scheduling runs or burning credits. That makes create-then-review-then-activate the safe flow. Conversely, passing `status: "active"` at create time *does* schedule runs immediately — treat it as the same class of action as `/activate` and confirm it with the user. Creating an active term on a deprecated engine is blocked with `400 deprecated_engine`.
 
@@ -355,3 +355,11 @@ Whatever entity consolidation the workspace applies (merging `Acme` and `Acme Gr
 ## 30. When the API and dashboard disagree, refresh the dashboard first
 
 Observed 2026-08-26: an API figure that disagreed with the dashboard came into line after the dashboard was hard-refreshed — the dashboard had been serving a cached value, not the API being wrong. Before concluding the API is off, have the user refresh the relevant dashboard view and re-compare. This is distinct from the preset-vs-ISO divergence in quirk 27, where the API genuinely returns different numbers by request shape.
+
+## 31. `POST /search-terms/{id}/run` is async — 502 usually means “running”, not “failed”
+
+A single GUI-engine run takes ~45–60s+, longer than the 60s gateway timeout, so `/run` **routinely returns HTTP 502** (an HTML body, per quirk 6) even though the run started and completes shortly after. **The source of truth is `executionsAmount` on `GET /search-terms` (or the credit drop) — never the HTTP response.** Verify a run by polling the count, not by reading the reply.
+
+While a term is executing, a second `/run` on it is **skipped**: `data.skippedCount: 1` with `results[].error: "Search term is currently being executed by scheduled function"`. This is a per-term lock, **distinct from `data.duplicate`** (quirk 21). Different terms run concurrently; the same term is lock-serialized — which cleanly enforces “wait for finish, then rerun” and prevents overshooting a target run count.
+
+Cost is **0.25 rankCredits per single-engine run** (`creditsInFlight` reflects it mid-run); ~50 credits for 200 runs. Bulk-run recipe that worked: each round, fire `/run` on every term below target → poll `executionsAmount` every ~20s until it increments → refire; only fire terms under target, and the lock blocks duplicates.
