@@ -8,6 +8,7 @@ this week?"* or *"what's my credit balance?"* and get clean tables back.
 
 - An agentic coding tool that can read a skill/instructions file and run shell commands — e.g. Claude Code, Cursor, OpenAI Codex, Windsurf, Gemini CLI, or GitHub Copilot (agent mode).
 - A shell with `curl` available.
+- Node.js 18 or later, only if you want the bulk-run script (`scripts/bulk_run.js`).
 - A Rankscale account with REST API access enabled. If your key starts with `rk_` you're set. Otherwise ask the Rankscale team to activate REST API access for your account.
 
 ## 1 — Drop the skill into place
@@ -24,7 +25,7 @@ On Windows, `~` resolves to `%USERPROFILE%`, so this lands at
 **Other tools** — put the folder wherever your tool loads skills or custom
 instructions from (for example, a project-level rules/instructions folder), or
 simply open the repo in your workspace and point your agent at `SKILL.md`. You
-should see `SKILL.md` and a `references/` folder inside. See
+should see `SKILL.md`, a `references/` folder, and a `scripts/` folder inside. See
 [Per-tool setup](#per-tool-setup) below for concrete recipes for Codex, Cursor,
 Windsurf, Aider, and web-only assistants.
 
@@ -76,13 +77,14 @@ project (e.g. `docs/rankscale/`), then add to your existing `AGENTS.md`:
 ```markdown
 ## Rankscale API
 When working with the Rankscale brand-visibility API, follow `docs/rankscale/SKILL.md`
-and consult `docs/rankscale/references/endpoints.md` and
-`docs/rankscale/references/quirks.md` as needed.
+and consult `docs/rankscale/references/endpoints.md`,
+`docs/rankscale/references/quirks.md`, and (before running search terms in bulk)
+`docs/rankscale/references/bulk-runs.md` as needed.
 ```
 
 **Option B — dedicated:** if the project has no `AGENTS.md` yet, copy `SKILL.md`
 to the project root and rename it `AGENTS.md`. Codex picks it up automatically.
-Copy the `references/` folder alongside it.
+Copy the `references/` and `scripts/` folders alongside it.
 
 ### Cursor
 
@@ -98,6 +100,7 @@ alwaysApply: false
 @docs/rankscale/SKILL.md
 @docs/rankscale/references/endpoints.md
 @docs/rankscale/references/quirks.md
+@docs/rankscale/references/bulk-runs.md
 ```
 
 ### Windsurf
@@ -114,6 +117,7 @@ aider \
   --read rankscale-api-skill/SKILL.md \
   --read rankscale-api-skill/references/endpoints.md \
   --read rankscale-api-skill/references/quirks.md \
+  --read rankscale-api-skill/references/bulk-runs.md \
   <your-other-files>
 ```
 
@@ -129,10 +133,11 @@ No filesystem, so paste instead of install:
    *"Use the following instructions when I ask about Rankscale or AI
    brand-visibility tracking."*
 3. When the conversation needs deeper endpoint detail or hits a quirk, paste the
-   relevant section of `references/endpoints.md` or `references/quirks.md`.
+   relevant section of `references/endpoints.md`, `references/quirks.md`, or
+   `references/bulk-runs.md`.
 
 Where the platform supports file attachments — Claude.ai Projects, ChatGPT
-custom GPTs with knowledge files, Gemini Gems — attach `SKILL.md` and both
+custom GPTs with knowledge files, Gemini Gems — attach `SKILL.md` and all three
 `references/*.md` files so they persist across the conversation.
 
 Note that a web assistant can't run `curl`, so it can only tell you *what* to
@@ -146,12 +151,13 @@ call, not call it. For actual data pulls you need one of the tools above.
 - **Sentiment**: positive/neutral/negative breakdowns
 - **Search-term reports**: per-query performance
 - **Workspace**: list/create/edit brands, topics, and search terms (writes always ask for confirmation)
+- **Bulk runs**: run every search term in a topic N times, all in parallel (`scripts/bulk_run.js`, dry run first)
 - **Credits**: balance + runway estimate
 
 ## Notes
 
 - The skill saves full JSON responses into a `Rankscale/` folder in your current working directory, so you can ask follow-up questions or build charts without re-calling the API.
-- Destructive actions (delete, deactivate, run-now which costs credits) always ask before executing.
+- Destructive actions (delete, deactivate, run-now which costs credits) always ask before executing. Bulk runs start with a dry run that shows the number of runs and the estimated `rankCredits` cost.
 - For any window a report will show, use explicit `isoStartDate`/`isoEndDate` dates rather than a `timeFrame` preset — presets can return different numbers than the matching ISO window and the dashboard. Always sanity-check that the returned window matches what you asked for.
 
 ## Trouble?
@@ -160,6 +166,8 @@ call, not call it. For actual data pulls you need one of the tools above.
 - **HTTP 401**: API key is missing, wrong, expired, or REST access isn't activated yet.
 - **HTTP 403 / "Unauthorized access to brand"**: the key is valid but belongs to a *different workspace* than the brand you're querying. Keys are workspace-scoped — if you have more than one Rankscale account, check you're using the right key.
 - **HTTP 404 with HTML body**: check the URL path is `/v1/...` not `/api/v1/...` (the skill handles this, but worth knowing if you build something custom).
+- **HTTP 502 from a search-term run**: normal. The run keeps going on the server; don't retry it.
+- **Only one search term runs at a time during a bulk run**: the agent is waiting for each `/run` call before sending the next. Point it at `references/bulk-runs.md`, or use `scripts/bulk_run.js`, which fires them in parallel.
 
 ## Disclaimer
 

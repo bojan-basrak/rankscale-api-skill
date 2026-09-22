@@ -11,6 +11,7 @@ Ask your agent things like:
 > *"Show me the citation sources for brand X."*
 > *"What's my Rankscale credit balance and runway?"*
 > *"List my tracked brands."*
+> *"Run every prompt in topic X 20 times."*
 
 …and get clean tables back, with the raw JSON saved alongside for follow-ups.
 
@@ -39,6 +40,7 @@ it'll follow the instructions there.
 - **Sentiment** — positive / neutral / negative breakdowns
 - **Search-term reports** — per-query performance
 - **Workspace management** — list / create / edit brands, topics, and search terms (writes always ask for confirmation)
+- **Bulk runs** — run every search term in a topic N times, all in parallel, with a bundled script ([`scripts/bulk_run.js`](scripts/bulk_run.js)) that starts with a dry run showing the runs and the estimated credit cost
 - **Credits** — balance and runway estimate
 
 ## Usage examples
@@ -52,6 +54,7 @@ produces — is here:
 
 - An agentic coding tool that can read a skill file and run shell commands (see the list above).
 - A shell with `curl` available (JSON parsing uses whatever's on hand — `node`, `jq`, or `python`).
+- Node.js 18 or later, only for the bulk-run script.
 - A Rankscale account with REST API access enabled (Agency Growth or Enterprise plan). If your API key starts with `rk_` you're set; otherwise ask the Rankscale team to enable REST API access.
 
 ## Install
@@ -90,18 +93,21 @@ setx RANKSCALE_API_KEY "rk_your_key_here"
 | [`SKILL.md`](SKILL.md) | The skill itself — setup, calling patterns, and workflow recipes |
 | [`references/endpoints.md`](references/endpoints.md) | Full endpoint inventory, request shapes, engine catalog, error codes |
 | [`references/quirks.md`](references/quirks.md) | API behaviors that affect how numbers should be interpreted |
+| [`references/bulk-runs.md`](references/bulk-runs.md) | How to run every search term N times: `/run` behavior, pre-flight checks, monitoring, reporting |
+| [`scripts/bulk_run.js`](scripts/bulk_run.js) | Bulk-run tool: fires all terms in parallel, tracks completions, stops at the goal (dry run by default) |
 | [`INSTALL.md`](INSTALL.md) | Setup guide |
 
 ## Limitations
 
 - **Paid plans only.** REST API access is available on Rankscale's Agency Growth and Enterprise plans. If you don't have an `rk_` key, the skill can't do anything — ask the Rankscale team to enable it.
-- **The API may change without notice.** Rankscale now publishes an official OpenAPI 3.1.0 reference for the Metrics API (help center → Metrics API, signed-in only); this skill is reconciled against it and filled in with hands-on probing where the spec is loose or silent. Last reconciled against the **2026-07-29** docs revision, with live field-testing passes on **2026-08-07** (corrected the `brandNotFound` flag and the API-key format, added several undocumented response fields) and **2026-08-26** (found that `timeFrame` presets disagree with ISO windows, that unfiltered `competitorMetrics[]` is truncated, and documented the `groupMeta` field). Endpoints, field names, engine IDs, and behaviors do shift — if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
+- **The API may change without notice.** Rankscale now publishes an official OpenAPI 3.1.0 reference for the Metrics API (help center → Metrics API, signed-in only); this skill is reconciled against it and filled in with hands-on probing where the spec is loose or silent. Last reconciled against the **2026-07-29** docs revision, with live field-testing passes on **2026-08-07** (corrected the `brandNotFound` flag and the API-key format, added several undocumented response fields), **2026-08-26** (found that `timeFrame` presets disagree with ISO windows, that unfiltered `competitorMetrics[]` is truncated, and documented the `groupMeta` field), and **2026-09-22** (corrected the `/run` behavior: it blocks until the run finishes, so bulk runs must fire concurrently; runs draw on `rankCredits`, not `analysisCredits`). Endpoints, field names, engine IDs, and behaviors do shift — if calls start failing or returning odd shapes, the skill likely needs updating. The quirks it documents (strict camelCase params, exclusive end dates, POST-not-GET reporting) are current-as-of-testing, not guaranteed-stable.
 - **No live validation here.** Nothing in this repo is tested against your account. Always sanity-check that returned time windows and numbers match what you asked for before trusting a report.
 - **Rate limits apply.** 200 requests/min per key; the skill caches and batches, but heavy ad-hoc use can hit the ceiling.
 
 ## Security
 
-The skill reads the API key from the `RANKSCALE_API_KEY` environment variable and
+The skill reads the API key from the `RANKSCALE_API_KEY` environment variable (the
+bulk-run script can instead read it from a file you name with `--key-file`) and
 never prints it or writes it to disk. No credentials are stored in this
 repository. Don't commit your key.
 

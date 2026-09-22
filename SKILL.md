@@ -1,6 +1,6 @@
 ---
 name: rankscale-api-skill
-description: Query the Rankscale AI brand-visibility API — list brands, pull reporting metrics (visibility, sentiment, citations, search terms), check credits, and manage workspace items (brands, topics, search terms). Use this whenever the user mentions Rankscale, RS, brand visibility tracking, AI brand mentions, GEO/AEO analytics, or asks about how a brand they track appears in AI assistant responses. Trigger even if they don't name the API explicitly — phrases like "how is my brand doing this week", "show me citations for brand X", "what's my credit balance", "list my tracked brands", "add a search term", or "run a search term" all warrant this skill.
+description: Query the Rankscale AI brand-visibility API — list brands, pull reporting metrics (visibility, sentiment, citations, search terms), check credits, manage workspace items (brands, topics, search terms), and trigger search-term runs, including bulk runs that execute every prompt in a topic N times in parallel. Use this whenever the user mentions Rankscale, RS, brand visibility tracking, AI brand mentions, GEO/AEO analytics, or asks about how a brand they track appears in AI assistant responses. Trigger even if they don't name the API explicitly — phrases like "how is my brand doing this week", "show me citations for brand X", "what's my credit balance", "list my tracked brands", "add a search term", "run a search term", "run all prompts in this topic 20 times", "run every prompt-engine pair", or "do a snapshot run" all warrant this skill.
 ---
 
 # Rankscale REST API
@@ -25,7 +25,7 @@ If the pull fails — offline, local uncommitted edits, or a diverged history �
 - **Base URL**: `https://rankscale.ai` (note: no `/api` prefix — the path is `/v1/...` directly on the marketing domain).
 - **Auth header**: `Authorization: Bearer $RANKSCALE_API_KEY`.
 - **Rate limit**: 200 requests per minute per API key. The response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, and `X-RateLimit-Reset` (seconds until window resets) — read them with `curl -i` if you're doing batch work. Cache reporting responses for 5–10 min when possible.
-- **Tools available**: `curl` for requests. For JSON parsing, use whatever the environment provides — `node -e "..."`, `jq`, or `python -m json.tool`. Check what's on PATH before assuming; don't hard-depend on any one of them.
+- **Tools available**: `curl` for requests. For JSON parsing, use whatever the environment provides — `node -e "..."`, `jq`, or `python -m json.tool`. Check what's on PATH before assuming; don't hard-depend on any one of them. The bulk-run script (`scripts/bulk_run.js`, recipe §8) needs Node 18+.
 - **Shell syntax**: examples below use bash-style variable expansion (`$RANKSCALE_API_KEY`). On Windows PowerShell that becomes `$env:RANKSCALE_API_KEY`. Pick whichever shell tool you call — both work, but mind the syntax.
 
 ## Calling pattern
@@ -52,7 +52,7 @@ Save raw JSON responses to a file next to the user's work (typically `Rankscale/
 
 **Size does not scale with window length** — `uncapped: true` matters far more. A single uncapped month came back *larger* than a capped three-month pull, so don't extrapolate a 1-month size from the 3m row.
 
-`/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. `/search-terms-report` with `includeAnswerTexts: true` is the same class (≈8.5 MB over a 3-month window); write it to a file too. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6).
+`/sentiment` and `/citations` are **never** safe to read inline — always `-o` to a file and extract. `/search-terms-report` with `includeAnswerTexts: true` is the same class (≈8.5 MB over a 3-month window); write it to a file too. On calls this heavy, capture the HTTP status too (`curl -w '%{http_code}'`), because a transient `502` arrives as an HTML body that looks like a broken path but just needs a retry (quirks §6). **The exception is `/run`:** there a 502 means the run is still going on the server, and a retry starts a duplicate (recipe §8).
 
 ```bash
 # Bash (Git Bash / WSL / macOS / Linux)
@@ -87,6 +87,19 @@ The complete endpoint inventory and request shapes live in `references/endpoints
 **Out of scope: the Share Links API.** Rankscale publishes a second REST API for public dashboard share links. It uses a different key (Settings → Sharing, not Settings → Integrations), so `RANKSCALE_API_KEY` won't authenticate against it. If the user asks to create or revoke a share link, say it's a separate API this skill doesn't cover — don't guess at its paths.
 
 ## Workflow recipes
+
+Find the task, then read that recipe in full before acting.
+
+| Task | Recipe |
+|---|---|
+| Resolve a brand name to an ID | §1 |
+| Metrics over a window; per-topic and per-engine series | §2 |
+| Citation sources | §3 |
+| Sentiment | §4 |
+| Credit balances | §5 |
+| Brand Rank vs. competitors | §6 |
+| Month-over-month comparison | §7 |
+| Run search terms now: one term, or every term in a topic N times | §8 |
 
 ### 1. Identify the brand
 
@@ -159,7 +172,9 @@ Per entry: `avgSentiment` (**0–100 scale**, = `totalSentimentScore / sentiment
 
 `/v1/metrics/credits` returns balances + runway. Show `rankCredits`, `analysisCredits`, `promptResearchCredits`, and the estimated `runway.estimatedRunwayHours` (convert to days for readability). Mention `creditsInFlight` if non-zero (means runs are queued/in-progress).
 
-The response carries two runway views: `runway` (detailed simulation, bounded — check `simulationLimitedByBilling` / `simulationLimitedByHorizon` and say which limit capped the estimate) and `dashboardRunway` (the burn-rate view the app's dashboard shows). Quote one, not a blend of both. `runway.nextBilling` can be `null`, so guard before reading `._seconds`.
+**Search-term runs draw on `rankCredits`, not `analysisCredits`** — about 0.25 per single-engine run (quirks §10). The balance is workspace-wide, so every brand's scheduled runs draw it down.
+
+The response may carry two runway views: `runway` (detailed simulation, bounded — check `simulationLimitedByBilling` / `simulationLimitedByHorizon` and say which limit capped the estimate) and `dashboardRunway` (the burn-rate view the app's dashboard shows). Quote one, not a blend of both. `runway.nextBilling` can be `null`, so guard before reading `._seconds`. Some workspaces return no runway block at all — only the five balance fields (observed 2026-09-22) — so guard for that too.
 
 ### 6. Brand Rank (by Visibility) — custom metric
 
@@ -204,11 +219,33 @@ The most common reporting ask, and the one where traps compound. Run this checkl
 8. **Use `engineMetricsData` and `topicMetricsData`, not just the headline.** A flat window aggregate routinely hides double-digit swings in opposite directions across engines and topics — that's usually the actual finding.
 9. **Cross-reference citations against visibility per engine.** They can move in *opposite* directions on the same engine (observed: ChatGPT visibility −5.1 while owned-domain citations +120%; Gemini 3.0 Flash visibility +11.8 while citations −36%). Visibility measures mention share; citations measure whether the brand's own site was the source. A visibility gain with a citation drop means the engine is discussing the brand while sourcing third parties — a materially weaker win, and worth flagging as such.
 
+### 8. Run search terms now — once, or every term N times
+
+`POST /v1/metrics/search-terms/{id}/run` (body `{}`) executes one search term immediately. Four facts decide how to call it (quirks §31):
+
+- **It blocks until the run finishes.** A GUI-engine run takes about 60–70 s, so the gateway usually cuts the call first and returns an HTML `502` at ~60 s, while the run keeps going on the server and completes.
+- **A `502` from `/run` means "still running", not "failed". Never retry it.** If the run already finished, the retry starts a duplicate.
+- **Each term runs one at a time; different terms run in parallel.** A second `/run` on a running term returns `skippedCount: 1` ("currently being executed by scheduled function") and starts nothing.
+- **Count runs with `executionsAmount`** on `GET /v1/metrics/search-terms`; it rises by one when a run completes. Never count runs from `/run` replies.
+
+`/run` works on `inactive` terms and leaves them inactive. Never activate terms just to run them: activating schedules recurring, credit-spending runs. Each single-engine run costs 0.25 `rankCredits` (quirks §10).
+
+**Bulk runs** ("run every prompt in topic X 20 times", "run each prompt-engine pair N times", a snapshot for a prospect): fire `/run` for **all** terms at once, never awaiting one call before sending the next. Then poll `executionsAmount` every ~15 s and re-fire each term as soon as its count rises, until it reaches the goal. Awaiting calls in sequence runs one term at a time. The dashboard then shows a single "Running…" row, which is a client bug, not a Rankscale limit. Observed 2026-09-22: 36 single-engine terms × 20 runs, fired in parallel, finished 708 runs in 34 minutes with no failures.
+
+**Use the bundled script rather than writing a loop.** It does all of the above, plus rate limiting, a concurrency cap, stuck-term handling, and logs. It is a dry run unless you pass `--execute`:
+
+```bash
+node <skill-folder>/scripts/bulk_run.js --brand "<name or id>" --topic "<name or id>" --target 20             # plan + cost estimate
+node <skill-folder>/scripts/bulk_run.js --brand "<name or id>" --topic "<name or id>" --target 20 --execute   # after the user confirms
+```
+
+`<skill-folder>` is the folder this `SKILL.md` was loaded from (Claude Code: `~/.claude/skills/rankscale-api-skill`). `--target N` counts the runs a term already has; `--add N` adds N on top. Tell the user which one you used. **Read `references/bulk-runs.md` before any bulk run:** it has the pre-flight checklist, confirmation wording, every option, monitoring, resuming, and the report format.
+
 ## Workspace writes — confirm before acting
 
 PATCH, DELETE, and the activate/deactivate/run actions modify the user's live Rankscale workspace. Before any write call, **state in plain language what will happen and to which item, then wait for explicit confirmation**. Example: *"I'll deactivate search term IZFBct… (\"best running shoes for flat feet\") on the Acme brand. This stops it from running until reactivated. Proceed?"*
 
-The `run` action on a search term costs credits — always show the user the current `analysisCredits` balance and a rough cost estimate (each run typically consumes a handful of credits across multiple AI engines) before triggering. **Creating a search term with `status: "active"` schedules runs immediately** — treat it as the same class of action as `/activate` and confirm it the same way. The default is `inactive`, so plain provisioning is safe.
+The `run` action costs `rankCredits`, not `analysisCredits` (quirks §10). Before triggering, show the user the `rankCredits` balance, the number of runs, and the estimated cost (about 0.25 per single-engine run). For more than one run, follow recipe §8 and start with the script's dry run. **Creating a search term with `status: "active"` schedules runs immediately** — treat it as the same class of action as `/activate` and confirm it the same way. The default is `inactive`, so plain provisioning is safe.
 
 Full request bodies for every create/update call are documented in `references/endpoints.md` — read it rather than probing. Five things to get right:
 
@@ -216,7 +253,7 @@ Full request bodies for every create/update call are documented in `references/e
 - **`POST /brands` requires `url` as well as `name`.** Both are min-length-1 strings.
 - **`brandInfo` doesn't round-trip.** Output is `{names[], productNames[]}`; input is `[{brands[], products[]}]`. Feeding the response shape back in silently does nothing (quirks §22).
 - **Never send empty-string placeholders.** `brandRef: ""` on a topic PATCH *detaches* it — and the docs' own example payload contains exactly that. Send only the keys you're changing (quirks §23).
-- **Check `data.success` on `/run`, not the envelope.** A `200` with `success: true` can wrap a failed execution; read `data.failureCount` and `results[].error` (quirks §21).
+- **Check `data.success` on `/run`, not the envelope.** A `200` with `success: true` can wrap a failed execution; read `data.failureCount` and `results[].error` (quirks §21). A `502` from `/run` is different: the run is still going (recipe §8).
 
 After any write, re-read the affected resource and confirm the change landed — unrecognized fields are accepted, reported only in `warnings[]`, and return `200`.
 
@@ -231,6 +268,7 @@ The full documented error catalog is in `references/endpoints.md`. Most common:
 - `403 forbidden`: resource doesn't belong to your workspace.
 - `404 not_found`: wrong path (remember `/v1/...` not `/api/v1/...`) or missing resource ID.
 - `429 rate_limited`: exceeded 200 req/min. Back off exponentially; read `X-RateLimit-Reset`.
+- `502` with an HTML body: on `/run`, the run is still going. Don't retry; confirm it through `executionsAmount` (recipe §8). On any other endpoint, it's a transient gateway failure: retry once (quirks §6).
 - `400 deprecated_engine`: tried to activate/run a search term whose engine is retired (see engine catalog in endpoints.md).
 - `400 limit_reached`: creating a brand would exceed your plan's brand cap.
 

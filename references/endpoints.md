@@ -313,6 +313,8 @@ createdAt, lastExecutionTime, nextScheduledExecutionTime    # the two times may 
 searchTermTopicRef: {id, name}
 ```
 
+`executionsAmount` is the term's lifetime count of completed runs. It rises by one when a run completes, and `lastExecutionTime` moves at the same moment, so it is the progress signal for `/run` (quirks §31, `references/bulk-runs.md`).
+
 ### POST `/v1/metrics/search-terms` — create
 
 Body (`SearchTermCreateRequest`). Resolves `myBrand` from `brandRef`, adds the term to the brand's operational search terms, and optionally links a topic.
@@ -356,6 +358,8 @@ No body. Returns `{id, status}`.
 
 **Takes a body — an empty object `{}`** (`--data '{}'`), not a bodyless POST. Runs the term through the shared backend execution pipeline.
 
+**Blocks until the run finishes.** A GUI-engine run takes about 60–70 s, so the gateway usually cuts the call at ~60 s with an HTML `502` while the run completes on the server. A 502 here is not a failure: never retry it, and confirm the run through `executionsAmount` on `GET /search-terms`. A second `/run` on a term that is still executing returns `skippedCount: 1` ("currently being executed by scheduled function") and starts nothing. Works on `inactive` terms without changing their status. To run many terms, fire the calls concurrently, never one after another (quirks §31, `references/bulk-runs.md`, `scripts/bulk_run.js`).
+
 ```
 data: {success, duplicate, totalRequested, successCount, failureCount, skippedCount,
        results[]: {searchTermId, success, executionId, error}}
@@ -363,7 +367,7 @@ data: {success, duplicate, totalRequested, successCount, failureCount, skippedCo
 
 **The envelope lies here.** The docs are explicit: *"The envelope is successful even when the term-level result failed; inspect `data.success` and `data.results`."* A `200` with outer `success: true` can still be a failed run — see quirks §21.
 
-**Costs credits.** Show the user `analysisCredits` balance and confirm.
+**Costs `rankCredits`**: 0.25 per single-engine run (observed 2026-09), not `analysisCredits` (quirks §10). Show the user the `rankCredits` balance and the estimated cost, and confirm.
 
 ---
 
@@ -419,6 +423,8 @@ data:
     breakdown: [...]
   dashboardRunway:                          # dashboard-style burn-rate runway metrics
 ```
+
+`runway` and `dashboardRunway` can be missing entirely: a 2026-09-22 response carried only `rankCredits`, `bonusRankCredits`, `analysisCredits`, `promptResearchCredits`, and `creditsInFlight`. Guard before reading them. Search-term runs draw on `rankCredits` (quirks §10).
 
 Convert `estimatedRunwayHours / 24` for days. `nextBilling._seconds` is a Unix epoch timestamp; the field can also come back `null` (no scheduled billing date), so guard before reading into it.
 

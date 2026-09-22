@@ -79,6 +79,7 @@ The API sits at `https://rankscale.ai/v1/...` on the marketing domain. Using `ht
 **But don't diagnose every HTML body as a bad path.** A heavy request can come back as a transient **`502 Server Error`** with a generic HTML error page (observed 2026-07-29 on a `3m` `/sentiment` call; the identical request succeeded on immediate retry with a 17 MB JSON body). Distinguish them by status code, not by the fact that the body isn't JSON:
 - **404 + HTML** → wrong path. Fix the URL; retrying won't help.
 - **502/503/504 + HTML** → transient gateway failure, most likely on a large payload. Retry once, then narrow the window (`3m` → `30d`) or add filters to shrink the response.
+- **Exception, `POST /search-terms/{id}/run`:** a 502 there means the gateway gave up at ~60 s while the run continues on the server. **Never retry it**: a retry after the run finished starts a duplicate. See quirk 31.
 
 Because both arrive as unparseable text, always capture the HTTP status alongside the body (`curl -w '%{http_code}'` or `-i`) on heavy calls — otherwise a retryable 502 gets misread as a broken integration.
 
@@ -107,9 +108,13 @@ All four reporting endpoints (`/report`, `/citations`, `/sentiment`, `/search-te
 
 The `/credits` response separates **rankCredits**, **bonusRankCredits**, **analysisCredits**, and **promptResearchCredits**. These are not interchangeable — different operations consume different pools. Present them as separate lines, and surface `creditsInFlight` if non-zero (means runs are queued or executing).
 
-## 10. The `run` action consumes credits
+## 10. The `run` action consumes `rankCredits`, not `analysisCredits`
 
-`POST /v1/metrics/search-terms/{id}/run` triggers an immediate AI-engine run for that search term. It costs credits across however many engines are attached. Always confirm with the user and show the current `analysisCredits` balance before triggering. The `runway.totalCostForNextExecution` field in `/credits` gives a rough estimate of cost-per-run.
+`POST /v1/metrics/search-terms/{id}/run` triggers an immediate AI-engine run for that search term. It draws on **`rankCredits`**: 0.25 per run of a single-engine term (verified 2026-09-10 and 2026-09-22; 708 runs cost exactly 177). Multi-engine terms are untested and likely cost more.
+
+**`analysisCredits` is not touched.** Verified 2026-09-22: about 740 runs left it at 200. Earlier revisions of this skill told you to show `analysisCredits` before a run; that is the wrong balance and makes a well-funded account look unable to afford the runs.
+
+Always confirm with the user and show the `rankCredits` balance and the estimated cost before triggering. The balance is workspace-wide, so other brands' scheduled runs draw it down too; a before/after delta can over-count a batch's cost when other brands ran in the same window. `runway.totalCostForNextExecution` in `/credits` may give a per-run estimate where present (unverified), but some workspaces return no `runway` block at all (observed 2026-09-22).
 
 ## 11. Deprecated engines block activation
 
@@ -221,7 +226,7 @@ data: {success, duplicate, totalRequested, successCount, failureCount, skippedCo
        results[]: {searchTermId, success, executionId, error}}
 ```
 
-**Never report a run as successful off the envelope.** Check `data.success`, then `data.failureCount` / `data.skippedCount`, then surface `results[].error` verbatim when non-zero. `data.duplicate: true` means the run was recognized as a repeat — flag it rather than presenting it as a fresh execution. Also note `/run` wants a body (`--data '{}'`), not a bodyless POST. For the async 502 behavior and the per-term execution lock, see quirk 31.
+**Never report a run as successful off the envelope.** Check `data.success`, then `data.failureCount` / `data.skippedCount`, then surface `results[].error` verbatim when non-zero. `data.duplicate: true` means the run was recognized as a repeat — flag it rather than presenting it as a fresh execution. Also note `/run` wants a body (`--data '{}'`), not a bodyless POST. For why `/run` usually answers 502 while the run succeeds, and the per-term execution lock, see quirk 31.
 
 **Creating a search term does *not* start it.** `SearchTermCreateRequest.status` defaults to **`inactive`**, so `POST /search-terms` provisions without scheduling runs or burning credits. That makes create-then-review-then-activate the safe flow. Conversely, passing `status: "active"` at create time *does* schedule runs immediately — treat it as the same class of action as `/activate` and confirm it with the user. Creating an active term on a deprecated engine is blocked with `400 deprecated_engine`.
 
@@ -356,10 +361,26 @@ Whatever entity consolidation the workspace applies (merging `Acme` and `Acme Gr
 
 Observed 2026-08-26: an API figure that disagreed with the dashboard came into line after the dashboard was hard-refreshed — the dashboard had been serving a cached value, not the API being wrong. Before concluding the API is off, have the user refresh the relevant dashboard view and re-compare. This is distinct from the preset-vs-ISO divergence in quirk 27, where the API genuinely returns different numbers by request shape.
 
-## 31. `POST /search-terms/{id}/run` is async — 502 usually means “running”, not “failed”
+## 31. `/run` holds the connection until the run finishes — a 502 means "still running", and awaited calls serialize a batch
 
-A single GUI-engine run takes ~45–60s+, longer than the 60s gateway timeout, so `/run` **routinely returns HTTP 502** (an HTML body, per quirk 6) even though the run started and completes shortly after. **The source of truth is `executionsAmount` on `GET /search-terms` (or the credit drop) — never the HTTP response.** Verify a run by polling the count, not by reading the reply.
+**Corrected 2026-09-22.** An earlier revision of this quirk called `/run` "async". It is the opposite: **the call blocks until the execution finishes.** A GUI-engine run takes about 60–70 s, longer than the gateway's ~60 s timeout, so the call routinely ends in an HTML **`502`** (quirk 6) even though the run started and completes seconds later on the server. The "async" label is dangerous because it suggests each call returns quickly, so a loop that awaits each call looks harmless. It isn't.
 
-While a term is executing, a second `/run` on it is **skipped**: `data.skippedCount: 1` with `results[].error: "Search term is currently being executed by scheduled function"`. This is a per-term lock, **distinct from `data.duplicate`** (quirk 21). Different terms run concurrently; the same term is lock-serialized — which cleanly enforces “wait for finish, then rerun” and prevents overshooting a target run count.
+Evidence from the 2026-09-22 field test (36 single-engine terms):
+- **Timing.** In a loop that awaited each call, every call took ~60 s to end in a 502. A retry 3 s later hit the per-term lock ("currently being executed"). The term's `lastExecutionTime` landed ~4 s after that.
+- **Throughput.** Awaiting each call in turn ran **one term at a time**. The dashboard showed a single "Running…" row, and completions arrived 60–70 s apart. Firing all 36 at once ran all 36 in parallel: 32 of 36 completed within ~90 s, and 708 runs finished in 34 minutes.
 
-Cost is **0.25 rankCredits per single-engine run** (`creditsInFlight` reflects it mid-run); ~50 credits for 200 runs. Bulk-run recipe that worked: each round, fire `/run` on every term below target → poll `executionsAmount` every ~20s until it increments → refire; only fire terms under target, and the lock blocks duplicates.
+**Rules that follow:**
+1. **Never await `/run` calls one after another in a batch.** Fire them concurrently (a short stagger is fine) and treat the reply as fire-and-forget.
+2. **Never retry a 502 from `/run`.** If the run already finished, the retry starts a duplicate. Retry-on-502 loops left one test term with extra runs.
+3. **Count runs with `executionsAmount`** on `GET /v1/metrics/search-terms`. It rises by one when a run *completes* (not when it starts), and `lastExecutionTime` moves at the same moment. Never count runs from `/run` replies.
+4. A reply that arrives in time (a run under ~60 s) has `data.successCount: 1` and an `executionId`. Still confirm through `executionsAmount`.
+
+**Per-term lock.** While a term is executing, another `/run` on it is **skipped**: `data.skippedCount: 1` with `results[].error: "Search term is currently being executed by scheduled function"`, and nothing new starts. This is distinct from `data.duplicate` (quirk 21). Different terms run concurrently; the same term is lock-serialized, which enforces "wait for finish, then rerun" and keeps a batch from overshooting its goal.
+
+**Status is untouched.** `/run` works on `inactive` / `manual` terms and leaves them `inactive`. There is no need to activate a term to run it, and activating would schedule recurring runs that spend credits.
+
+**Runs vary widely in length.** Most finish in 60–70 s, but some took 10+ minutes in testing. A term with no completion after a few minutes can be re-fired: a "skipped" reply means it is still running; otherwise the earlier run failed without an error, and the new call starts a fresh one.
+
+**Cost:** 0.25 `rankCredits` per single-engine run, and `creditsInFlight` in `/credits` reflects runs in progress (2026-09-10 test); see quirk 10.
+
+Full bulk-run procedure: `references/bulk-runs.md`. Ready-made tool: `scripts/bulk_run.js`.
