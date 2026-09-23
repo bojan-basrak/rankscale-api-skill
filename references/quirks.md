@@ -142,6 +142,11 @@ Three of these are load-bearing and easy to miss:
 
 **`category: "owned"` does NOT mean owned by the tracked brand.** It marks *a company's own website* as opposed to a portal, directory, or editorial site — so every competitor's own domain carries it too. Verified 2026-08-07: ~100 distinct domains per month carried `category: "owned"`, including the tracked brand's site and all of its competitors' sites side by side. Never use it to isolate the user's own properties — match on the known domain instead. Same class of trap as `topDomainsByCompetitor` below.
 
+Three more URL-object fields (observed 2026-09-22):
+- **`searchTerms[]`** entries are `{id, urlOccurrences}`, and `urlOccurrences` summed over a URL's entries equals its `occurrences` exactly (checked across 1,266 URLs). Map each term ID to its prompt and engine and you get exact per-prompt and per-engine citation counts for every page.
+- **`brands[]`** entries are `{brandName, occurrences, isOwnBrand, firstSeenAt, lastSeenAt}`. They appear to be the brands named in the answers that cited the URL (co-mentions), not brands found on the page. Useful as "answers citing this page tend to name X", not as proof that X is on the page.
+- **`counts`** is `{<date>: n}` with `countsGranularity` (e.g. `"daily"`).
+
 Two more gotchas in `domainSummary`:
 - `topDomainsByOwnBrandCitations` (domains that cite the tracked brand) and `topDomainsByCompetitor` are **capped at 20 / 10 entries** respectively. Don't treat them as complete.
 - `topDomainsByCompetitor` groups domains where a **competitor was mentioned** — this includes neutral third-party sites (Reddit, Booking, review blogs), NOT just competitor-owned domains. To find competitor-*owned* sites (e.g. to exclude them from an opportunity list), classify domains by judgment; don't rely on this field.
@@ -351,6 +356,8 @@ To get the complete competitor set, run one `/report` per search term (each with
 
 **Consequence for Brand Rank (SKILL.md §6):** a pool size taken from one unfiltered call understates the true pool, so it is a lower bound. Call the rank "of the summarised set" unless you unioned per-query results.
 
+**Filtered calls are capped too, at about 100 entries.** Observed 2026-09-22 on a 36-term snapshot: `selectedTopic` and per-prompt `selectedQuery` calls returned 99 to 101 entries (100 competitors plus the tracked brand) whenever the roster was larger, while `/search-terms-report` listed up to 88 brands for a single prompt-engine pair. For complete rosters on large prompt sets, build them from `/search-terms-report` (quirk 33) rather than from `competitorMetrics[]`.
+
 ## 29. `/search-terms-report` returns raw per-execution detections — no brand grouping
 
 Whatever entity consolidation the workspace applies (merging `Acme` and `Acme Group`, case variants, and so on), `/search-terms-report` does **not** apply it — it returns raw per-execution brand detections. `/report`'s `competitorMetrics[]` is grouped (see `groupMeta`, endpoints.md); `/search-terms-report` is not. Don't match competitor names across the two endpoints without normalising and grouping yourself (quirk 24). Verified 2026-08-26.
@@ -384,3 +391,25 @@ Evidence from the 2026-09-22 field test (36 single-engine terms):
 **Cost:** 0.25 `rankCredits` per single-engine run, and `creditsInFlight` in `/credits` reflects runs in progress (2026-09-10 test); see quirk 10.
 
 Full bulk-run procedure: `references/bulk-runs.md`. Ready-made tool: `scripts/bulk_run.js`.
+
+## 32. Topic-level `competitorMetrics` shares use a different base for each brand
+
+**Observed 2026-09-22 through the API; not yet cross-checked in the dashboard.** On a one-hour snapshot (36 single-engine terms × 20 runs = 720 executions), a `/report` filtered by `selectedTopic` gave each competitor a `detectionRate` that implies a different denominator per brand. The top brand had 164 `appearances` at `detectionRate: 30.4`, so its base was about 539, not 720. Other brands ranged from about 315 to about 567. `visibilityScore` follows the same base, so the topic-level shares run high (top brand 28.7, against 20.8 recomputed over all 720 executions) and the brands are not measured against the same total. The mechanism is unclear. One guess is that each brand's base is the executions inside its own first-seen to last-seen window, which would distort short snapshots most.
+
+**Per term, the numbers are exact.** For every brand in every term of `/search-terms-report`, `visibilityScore` equals `round1(100 × (appearances / runs) / (1 + 0.1 × (avgRank - 1)))`, with no deviation above 0.1 across all brand-term entries. `detectionRate` equals `appearances / runs × 100`.
+
+**Practical guidance:**
+- For snapshot or topic-wide comparisons, recompute from `/search-terms-report` (SKILL.md §9). Per brand, sum `appearances` and `appearances × avgRank` over the terms in scope, divide by the total executions of those terms, then apply the formula. Every brand then shares one base.
+- State the base next to the numbers ("% of all 720 answers").
+- If a client may compare with the dashboard's topic view, say in the report that its topic totals use a different base, and that per-term figures match.
+- Cross-check one topic in the dashboard before relying on this finding for anything beyond a snapshot (see quirk 30).
+
+## 33. `/search-terms-report` per-term fields: what the counts mean
+
+Observed 2026-09-22 on 36 single-engine terms with 20 runs each (checked against the answer texts):
+- **`appearances`** = executions of the term whose answer names the brand. `detectionRate` = `appearances / runs × 100`.
+- **`top3`** is a percentage of the term's executions with the brand in positions 1 to 3 (always ≤ `detectionRate`). Multiply by runs / 100 for a count.
+- **`variations[]`** holds spelling variants that Rankscale grouped *within that term*, each with its own counts. The parent's `appearances` counts unique executions: the variants' sum, or one less when a single answer used both spellings.
+- **Grouping stops at the term boundary.** The same company shows up as `Acme` in one term and `ACME` in another. Sometimes two spellings even sit as separate top-level entries in the same term (`Gamma Pixel` and `GammaPixel`). Normalise names across terms (quirk 24). When two top-level entries in one term map to one company, the summed `appearances` can double count an answer that used both. In practice the sums held: 39 such merges checked against the answer texts, and 3 needed capping.
+- **`answerTexts[]`** gives one entry per execution. The longest of 720 was exactly 5,000 characters, so texts appear to be capped at 5,000.
+- **`competitors[]`** also lists entities that are not competitors: software, directories, marketplaces, example clients the answers mention. Classify them before ranking competitors.

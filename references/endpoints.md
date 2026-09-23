@@ -105,18 +105,22 @@ Same shared filters. Supports `includeAnswerTexts: true` to include the raw AI a
 Response (`data`):
 
 ```
-data.timeFrame
+data.timeFrame                                          # echoed (e.g. "7d") even for a custom ISO window - ignore it then
 data.requestedDateRange: {source, startDate, endDate}   # echo of the resolved window — check this
 data.searchTerms[]:
   searchTermId, query, aiSearchEngines[], tags[], status
   topic: {id, name}
   interval, region, websearch, lastSnapshotAt
-  ownBrand:      {name, visibilityScore, avgRank, detectionRate, top3, citationCount, avgSentiment}
-  competitors[]: {name, visibilityScore, avgRank, detectionRate, top3, citationCount, avgSentiment}
-  answerTexts[]: {executionId, executedAt, engine, answerText}   # only with includeAnswerTexts
+  ownBrand:      {name, visibilityScore, avgRank, detectionRate, top3, citationCount, avgSentiment}   # key absent when the tracked brand was never detected
+  competitors[]: {name, appearances, avgRank, detectionRate, top3, citationCount, avgSentiment,
+                  visibilityScore, latestRank, isOwnBrand, firstSeen, lastSeen,
+                  variations[]}                          # variations = same-term spelling variants, each with the same fields
+  answerTexts[]: {executionId, executedAt, engine, answerText}   # only with includeAnswerTexts; texts appear capped at 5,000 characters
 ```
 
-`requestedDateRange` is the cheapest way to confirm the window the API actually applied (cf. quirks §1).
+`requestedDateRange` is the cheapest way to confirm the window the API actually applied (cf. quirks §1). **On this endpoint the end date is inclusive**: `isoEndDate: "2026-09-24"` resolved to `endDate: 2026-09-24T23:59:59.999Z` (observed 2026-09-22), unlike `/report`'s exclusive end (quirks §1b).
+
+Per term, these numbers are exact and reproduce Rankscale's Visibility Index formula. That makes this the right source for per-response metrics across a snapshot or topic (quirks §32 and §33, SKILL.md §9).
 
 ### POST `/v1/metrics/sentiment` — brand sentiment
 

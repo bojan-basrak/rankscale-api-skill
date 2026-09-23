@@ -100,6 +100,7 @@ Find the task, then read that recipe in full before acting.
 | Brand Rank vs. competitors | §6 |
 | Month-over-month comparison | §7 |
 | Run search terms now: one term, or every term in a topic N times | §8 |
+| Report a snapshot or topic per AI answer (shares with one common base) | §9 |
 
 ### 1. Identify the brand
 
@@ -199,6 +200,7 @@ The response may carry two runway views: `runway` (detailed simulation, bounded 
 - **~2-week competitor backfill.** `competitorTimeSeriesData` only carries competitor values for roughly the trailing ~2 weeks of the window — earlier buckets are 0 for every competitor, so daily ranks there are spurious rank-1s (quirk 16b). Null-out (don't zero) those older values and caption the truncation; window aggregates stay valid.
 - **Low-visibility lower bound.** `competitorTimeSeriesData` carries a smaller competitor set (~25–35) than the full detected pool in `competitorMetrics` (dozens). For a deep long-tail brand the daily rank is a *lower bound* — a competitor absent from the series could outrank it on a given day. Flag it.
 - **Cross-surface note.** If computing this via the Rankscale MCP instead of the API, ignore its `own_brand_rank` field — it is always `1` (a display pin), not a ranking.
+- **Topic-filtered pools use a different base per brand** (quirks §32), and filtered `competitorMetrics[]` caps at about 100 entries (quirks §28). For a short snapshot or a like-for-like topic ranking, recompute from `/search-terms-report` instead (§9).
 - When a rank surprises you, cross-check the dashboard UI before trusting it.
 
 ### 7. Month-over-month comparison
@@ -240,6 +242,23 @@ node <skill-folder>/scripts/bulk_run.js --brand "<name or id>" --topic "<name or
 ```
 
 `<skill-folder>` is the folder this `SKILL.md` was loaded from (Claude Code: `~/.claude/skills/rankscale-api-skill`). `--target N` counts the runs a term already has; `--add N` adds N on top. Tell the user which one you used. **Read `references/bulk-runs.md` before any bulk run:** it has the pre-flight checklist, confirmation wording, every option, monitoring, resuming, and the report format.
+
+### 9. Report a snapshot or topic per AI answer
+
+Use this after a bulk run (§8), or whenever brands in a topic must be compared on one common base. Topic-level `/report` aggregates give each brand its own denominator (quirks §32), so compute from the per-term data instead:
+
+1. `POST /v1/metrics/search-terms-report` with `selectedTopic`, an ISO window that covers the runs (its end date is inclusive, endpoints.md), and `includeAnswerTexts: true`. Write it to a file: 36 terms × 20 runs came to about 1.8 MB.
+2. Map each term to its prompt and engine (`query`, `aiSearchEngines[0]`); runs per term = `answerTexts.length`.
+3. Normalise and merge brand names across terms (quirks §24, §33), then classify non-agency entities (software, directories, marketplaces).
+4. Per brand and slice (overall, prompt, engine, tag), sum `appearances` and `appearances × avgRank`, then divide by the slice's total executions:
+   - mention rate = appearances / executions
+   - average position = Σ(appearances × avgRank) / appearances
+   - Visibility Index = `round1(100 × rate / (1 + 0.1 × (avgPos - 1)))`
+   Per term this reproduces Rankscale's `visibilityScore` exactly; spot-check a few terms to confirm.
+5. For citations, `POST /citations` with `uncapped: true`. Each URL's `searchTerms[].urlOccurrences` gives exact per-prompt and per-engine counts (quirks §13b).
+6. Search the answer texts for the tracked brand's name and domain yourself. A sandbox brand's own-brand metrics say nothing about the prospect.
+
+Report the base next to every share ("% of all 720 answers"). If the reader may open the dashboard, add that its topic view uses a different base.
 
 ## Workspace writes — confirm before acting
 
