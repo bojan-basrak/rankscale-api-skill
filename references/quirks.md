@@ -2,6 +2,10 @@
 
 Read this before presenting metrics to the user. None of these are bugs — they're behaviors that affect how the numbers should be interpreted or how to call the API correctly.
 
+> **⚠ READ FIRST — this trap has already put wrong numbers into a client report (quirk 34).**
+> On `POST /v1/metrics/report`, the window-level **rate** metrics — `ownBrandMetrics.visibilityScore`, `detectionRate`, `top3`, `avgPosition`, `sentiment`, and every `competitorMetrics[].visibilityScore` / `detectionRate` / `top3` — are **the value of the LAST bucket of the `aggregation` you requested, not of the whole window.** Ask for a month with `aggregation: "daily"` and "the month's visibility" is really the last day's. The same holds on every `selectedEngine` / `selectedTopic` / `selectedQuery` cut, and `trends` is just the last bucket minus the one before it.
+> **Rule:** for any number that describes a period, request **exactly one bucket that covers exactly that period** (`aggregation: "monthly"` with a calendar-month window) and read the top-level values. Make a **separate** daily call for trend charts. Before reporting, assert `historicalData.<aggregation>.timestamps.length === 1`.
+
 ## 1. Parameter names are camelCase-strict — but the API now tells you when you get it wrong
 
 The reporting body uses **`timeFrame`** (capital F), not `timeframe` or `time_frame`. Same goes for `isoStartDate`, `isoEndDate`, `selectedTopic`, `includeNotFoundExecutions`, etc. Send the wrong casing or a guessed name (`window`, `lookbackDays`, `range`, `period`…) and the API will still:
@@ -62,15 +66,24 @@ The flag behaves like **"at least one execution in this bucket did not surface t
 
 Each brand carries a `brandInfo.names[]` array of aliases (e.g. a brand "Acme" might match *"Acme Inc", "Acme Corp", "acme.com"*). When the user refers to a brand, search both the canonical `name` and `brandInfo.names[]` for matches. Missing aliases is the most common cause of low detection rates.
 
-## 4. Snapshot metrics ≠ sum of daily metrics
+## 4. Snapshot values: counts are window sums, rates are the LAST bucket
 
-The snapshot values at the top of `ownBrandMetrics` (`mentions`, `citations`, etc.) are **weighted aggregates over the requested window**, not the sum of the daily arrays. Don't try to reconcile them. Use the snapshot for "right now" headlines and the daily arrays for trend visualization.
+**Corrected 2026-10-13.** An earlier revision called every snapshot value a "weighted aggregate over the requested window". That is wrong for rate metrics and led to a mis-reported month (quirk 34). The top-level values in `ownBrandMetrics` are of two kinds:
 
-## 5. `trends` is delta vs. the previous comparable window
+| Kind | Fields | Top-level value equals |
+|---|---|---|
+| Counts | `mentions`, `sources`, `citations`, `executionsAnalyzed` | the **sum** of the bucket arrays over the window (a correct window total) |
+| Rates | `visibilityScore`, `detectionRate`, `top3`, `avgPosition`, `sentiment` | the **last bucket** of the requested `aggregation` (not the window) |
 
-The `trends` object is the raw change vs. the previous comparable window (same length, immediately preceding). Sign reflects raw delta, not "improvement":
-- For `visibilityScore`, `sentiment`, `mentions`, `citations`, `detectionRate`, `top3` — positive = up = better.
-- For `avgPosition` — positive = position got higher in number = *worse* (lower rank). Negative = better. Always explain this in user-facing output ("avg position improved by 0.4").
+Counts reconcile exactly with the bucket arrays; rates reconcile exactly with the final bucket. Use counts freely. Never use a rate from a multi-bucket response as a window figure (quirk 34).
+
+## 5. `trends` is last bucket minus the previous bucket — not window vs. previous window
+
+**Corrected 2026-10-13.** An earlier revision said `trends` compares the window with the preceding window of the same length. It does not: `trends.<metric>` = `historicalData.<agg>.<metric>[last] − [last − 1]`. Verified for September 2026 on one brand: with `aggregation: "daily"`, `trends.visibilityScore` was `19.8` = `58.3` (30 Sep) − `38.5` (29 Sep, a 2-execution bucket), and `trends.executionsAnalyzed` was `177` = `179 − 2`. With `weekly` it was `−0.3`; with `monthly` (one bucket) every trend was `0`.
+
+So `trends` is a bucket-to-bucket change that swings wildly on thin buckets. **Never report it as a period-over-period change.** For month-over-month, pull each month as its own one-bucket call and subtract (SKILL.md §7).
+
+The sign is the raw delta, not "improvement": for `avgPosition` a positive value means a worse (numerically higher) position.
 
 ## 6. URL gotcha: `/v1/...`, not `/api/v1/...` — and not every HTML body is a path error
 
@@ -186,13 +199,15 @@ The per-competitor series in `data.competitorTimeSeriesData` lists competitors o
 
 ## 16b. `competitorTimeSeriesData` only backfills the trailing ~2 weeks
 
-In `POST /v1/metrics/report`, `data.competitorTimeSeriesData` (both `daily` and `weekly` aggregation) only carries competitor values for roughly the trailing ~2 weeks of the requested window. Earlier buckets are `0` for **every** competitor, even when the competitors were demonstrably present in that period — re-querying an earlier block alone as its own window returns real (non-zero) `competitorMetrics` aggregates for the same dates where the full-window series showed 0 (verified 2026-07-15). The own-brand series (`ownBrandMetrics.historicalData`) is complete for the full window, and window-level `competitorMetrics` aggregates remain valid for the full period.
+In `POST /v1/metrics/report`, `data.competitorTimeSeriesData` (both `daily` and `weekly` aggregation) only carries competitor values for roughly the trailing ~2 weeks of the requested window. Earlier buckets are `0` for **every** competitor, even when the competitors were demonstrably present in that period — re-querying an earlier block alone as its own window returns real (non-zero) `competitorMetrics` aggregates for the same dates where the full-window series showed 0 (verified 2026-07-15). The own-brand series (`ownBrandMetrics.historicalData`) is complete for the full window, and `competitorMetrics[]` from a call that returns **one bucket** for the period (quirk 34) gives valid competitor values for the full period.
 
-**Practical guidance:** when plotting competitor time series, null-out (don't zero) competitor values older than ~2 weeks and caption the truncation. Daily Brand Ranks (SKILL.md §6) computed from those older buckets are spurious — the entire competitor pool reads 0, so the own brand appears rank 1. Use window aggregates for anything beyond the trailing ~2 weeks.
+**Practical guidance:** when plotting competitor time series, null-out (don't zero) competitor values older than ~2 weeks and caption the truncation. Daily Brand Ranks (SKILL.md §6) computed from those older buckets are spurious — the entire competitor pool reads 0, so the own brand appears rank 1. For anything beyond the trailing ~2 weeks, use one-bucket `competitorMetrics[]` per period (quirk 34).
 
-## 17. Aggregate metrics are period-weighted, not daily averages
+## 17. The "aggregate vs. daily" disagreement was the last-bucket effect
 
-Window-level `visibilityScore` (and any Brand Rank derived from it) is a weighted aggregate over the requested window — not the mean of the daily series. A brand can be aggregate rank 1 while sitting at daily rank 2 on most days. Use the aggregate for the headline and the daily series for the trend; don't try to reconcile them (cf. quirk 4).
+**Corrected 2026-10-13.** This quirk used to say that window-level `visibilityScore` is a period-weighted aggregate that legitimately disagrees with the daily series ("aggregate rank 1 while daily rank 2 on most days — don't reconcile them"). The real explanation is quirk 34: with `aggregation: "daily"`, the "aggregate" is only the **last day**, so it naturally disagrees with the other days.
+
+A true one-bucket window value (`aggregation: "monthly"` on a calendar month) **does** reconcile: it equals the `executionsAnalyzed`-weighted mean of the daily buckets (59.1 against 59.08 on a 2,546-execution month). If a window value and the daily series disagree, suspect a multi-bucket request first.
 
 ## 18. Date filtering is reliable — the old "~7–8 days only" claim was a mis-casing artifact
 
@@ -301,7 +316,7 @@ Three things the response returns that the upstream docs and earlier revisions o
 [{engineId, engineName, visibilityScore[], sentiment[], avgPosition[], detectionRate[], …}, …]
 ```
 
-This is the only way to see per-engine movement over time without one filtered `/report` call per engine, and on a month-over-month comparison it was the highest-value cut in the whole response — it exposed a ~14-point visibility swing between engines that the window aggregate completely hid. Reach for it whenever the user asks "which AI engines".
+This is the only way to see per-engine movement over time without one filtered `/report` call per engine, and on a month-over-month comparison it was the highest-value cut in the whole response — it exposed a ~14-point visibility swing between engines that the window aggregate completely hid. Reach for it whenever the user asks "which AI engines". Use it for the per-engine *series*; for a per-engine *period* figure, make one `selectedEngine` call with a single bucket (quirk 34).
 
 **Two extra daily bucket arrays.** The `historicalData.<agg>` bucket list also includes **`sources`** and **`citationCounts`**, beyond the documented `visibilityScore` / `sentiment` / `mentions` / `citations` / `avgPosition` / `detectionRate` / `top3` / `brandNotFound`. Read quirk 26 before using `sources` — outside the trailing few buckets of the requested window it is structurally `0`, not measured.
 
@@ -403,6 +418,7 @@ Full bulk-run procedure: `references/bulk-runs.md`. Ready-made tool: `scripts/bu
 - State the base next to the numbers ("% of all 720 answers").
 - If a client may compare with the dashboard's topic view, say in the report that its topic totals use a different base, and that per-term figures match.
 - Cross-check one topic in the dashboard before relying on this finding for anything beyond a snapshot (see quirk 30).
+- Re-check this with quirk 34 in mind: if the window behind these figures spanned more than one bucket of the requested `aggregation`, the topic-level rates were last-bucket values, which may explain part of the gap.
 
 ## 33. `/search-terms-report` per-term fields: what the counts mean
 
@@ -413,3 +429,51 @@ Observed 2026-09-22 on 36 single-engine terms with 20 runs each (checked against
 - **Grouping stops at the term boundary.** The same company shows up as `Acme` in one term and `ACME` in another. Sometimes two spellings even sit as separate top-level entries in the same term (`Gamma Pixel` and `GammaPixel`). Normalise names across terms (quirk 24). When two top-level entries in one term map to one company, the summed `appearances` can double count an answer that used both. In practice the sums held: 39 such merges checked against the answer texts, and 3 needed capping.
 - **`answerTexts[]`** gives one entry per execution. The longest of 720 was exactly 5,000 characters, so texts appear to be capped at 5,000.
 - **`competitors[]`** also lists entities that are not competitors: software, directories, marketplaces, example clients the answers mention. Classify them before ranking competitors.
+- **For a window that ended in the past, check that the data is actually from that window** (quirk 35).
+
+## 34. `/report` window-level rates are the LAST bucket of the requested `aggregation`
+
+**Verified 2026-10-13 on one brand (23 prompts × 8 engines, about 2,500–2,900 executions per month). This is the most consequential trap in this file: it produced wrong per-engine and per-topic monthly figures in a delivered client report before it was found.**
+
+**What happens.** In `POST /v1/metrics/report`, every top-level *rate* value describes only the final bucket of the `aggregation` you asked for:
+- `ownBrandMetrics.visibilityScore`, `detectionRate`, `top3`, `avgPosition`, `sentiment`
+- `competitorMetrics[].visibilityScore`, `detectionRate`, `top3` (and `latestValue`, which is identical)
+- the same fields on every filtered call (`selectedEngine`, `selectedTopic`, `selectedQuery`, `selectedTags`)
+- `trends` = last bucket minus the bucket before it (quirk 5)
+
+Counts are not affected: `mentions`, `sources`, `citations`, `executionsAnalyzed` and `competitorMetrics[].appearances` are window sums (quirk 4).
+
+**Evidence — one brand, September 2026 window (`isoStartDate 2026-09-01`, `isoEndDate 2026-09-29`):**
+
+| `aggregation` | Buckets returned | Top-level `visibilityScore` | Last bucket | `executionsAnalyzed`-weighted mean of the daily buckets |
+|---|---|---|---|---|
+| `daily` | 24 | 58.3 | 58.3 (30 Sep) | 59.08 |
+| `weekly` | 5 | 57.7 | 57.7 (week of 28 Sep) | 59.09 |
+| `monthly` | 1 | **59.1** | 59.1 | 59.08 ✓ |
+
+`detectionRate` behaved the same way (65.9 / 65.9 / **67.6**, weighted mean 67.56), as did `top3`, `avgPosition` and `sentiment`. On an engine-filtered call the error was far larger: Perplexity (GUI) for August read **72.1** with `daily` (= 31 Aug) against **46.9** with `monthly`.
+
+A window that crosses a month boundary returns one `monthly` bucket per calendar month, so the top-level value again covers only the last part: `2026-08-15 → 2026-09-14` returned buckets for August (61.9, 1,623 executions) and September (59.3, 1,098 executions), top-level `visibilityScore` 59.3, while the true window value is 60.9.
+
+**How to get correct window figures:**
+1. **Calendar month** — send that month's ISO window (mind the exclusive end, quirk 1b) with `aggregation: "monthly"`. Assert `historicalData.monthly.timestamps.length === 1` before reading any top-level rate. This works for own brand, competitors, and every filtered cut.
+2. **Monday-to-Sunday week** — weekly buckets start on Monday, so `aggregation: "weekly"` over exactly one Monday-to-Sunday window should return one bucket. Not yet tested; assert one bucket before reading the top-level values.
+3. **Any other window, own brand only** — request `daily` and compute the `executionsAnalyzed`-weighted mean of each rate across the daily buckets: `Σ(rate[i] × executionsAnalyzed[i]) / Σ executionsAnalyzed[i]`. This matched the one-bucket value to 0.1. There is no equivalent for competitors, because `competitorTimeSeriesData` only covers the trailing ~2 weeks (quirk 16b); report competitors for calendar months or single weeks only.
+4. **Trend charts** — make a *separate* `daily` call and use only its bucket arrays, never its top-level values.
+
+**How to spot that you've been hit:** a "monthly" figure equals the last element of `historicalData.daily.visibilityScore`; per-engine or per-topic values swing by 10–40 points between months while the daily series looks steady; `trends` shows a huge jump. Re-pull with one bucket before reporting anything.
+
+**Earlier findings in this file that this changes:** quirks 4, 5 and 17 have been corrected. The API-vs-dashboard comparisons in quirks 27 and 30 were made before this was known; if they used a multi-bucket request, the API side was a last-bucket value. Recipes in SKILL.md (§2, §6, §7) now require one-bucket calls.
+
+## 35. `/search-terms-report` may ignore a window that ended in the past
+
+**Observed 2026-10-13; mechanism not yet confirmed.** Two calls for complete past months (`isoStartDate 2026-08-01` → `isoEndDate 2026-08-31`, and the same for September), without `includeAnswerTexts`, echoed the custom window correctly in `requestedDateRange`, but the per-term data did not come from it:
+- Not one of 6,375 (August) and only 46 of 2,920 (September) competitor entries had `firstSeen` and `lastSeen` inside the requested month; most carried `firstSeen` in April–May 2026 and `lastSeen` on 11 October 2026, after the window ended.
+- In the September response no term had more than 4 `appearances`, although every term had run about 15 times that month. The tracked brand's `ownBrand` entry showed `firstSeen` 6 October.
+- The echoed `timeFrame` differed between the two calls (`"3m"` and `"30d"`), which hints that a preset relative to today was resolved instead of the custom window.
+
+The same request with `includeAnswerTexts: true` over a full month failed with HTTP 502 three times in a row.
+
+The 2026-09-22 findings in quirks 32 and 33 used a window that ended on the day of the call, which may be why they looked correct.
+
+**Practical guidance:** after any `/search-terms-report` call, check that every `firstSeen` / `lastSeen` (and every `answerTexts[].executedAt`, when present) falls inside the requested window. If they don't, don't use the response for that window. Use filtered `/report` calls with one bucket per period (quirk 34) instead, for example one `selectedQuery` call per term.

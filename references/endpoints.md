@@ -44,7 +44,7 @@ Body (`MetricsReportRequest`):
 |---|---|---|
 | `brandId` | string, required | The brand to report on |
 | `timeFrame` | enum string | `24h`, `7d`, `30d`, `3m`, `1y`. **Avoid for user-facing numbers — presets disagree with the equivalent ISO window and the dashboard; use `isoStartDate`+`isoEndDate` (quirks §27).** |
-| `aggregation` | enum string | `hourly`, `daily`, `weekly`, `monthly` — bucket size for time series |
+| `aggregation` | enum string | `hourly`, `daily`, `weekly`, `monthly` — bucket size for time series. **Also decides what the top-level rates mean: they are the LAST bucket's values (quirks §34).** For window figures, choose the value that yields exactly one bucket (calendar month → `monthly`). |
 | `periodOffset` | integer, default 0 | Shifts the preset window back; 0=current, 1=previous, … |
 | `isoStartDate` | string | Custom range start. Paired with `isoEndDate`. Overrides `timeFrame`+`periodOffset`. |
 | `isoEndDate` | string | Custom range end. Paired with `isoStartDate`. |
@@ -62,9 +62,11 @@ Response (`data` object, observed shape):
 ```
 data.ownBrandMetrics:
   name, aliases[]
-  visibilityScore, sentiment, mentions, citations, avgPosition, detectionRate, top3
+  visibilityScore, sentiment, avgPosition, detectionRate, top3   # ⚠ LAST bucket of `aggregation`, NOT the window (quirks §34)
+  mentions, sources, citations, executionsAnalyzed               # window sums of the bucket arrays (quirks §4)
   validMetricsCount
   trends: { visibilityScore, sentiment, mentions, citations, avgPosition, detectionRate, top3 }
+                                        # ⚠ last bucket minus previous bucket — NOT window vs. previous window (quirks §5)
   historicalData:
     hourly, daily, weekly, monthly      # only the one matching `aggregation` is populated
     each contains: timestamps[] + parallel arrays for each metric, plus brandNotFound[]
@@ -80,6 +82,8 @@ data.competitorMetrics[]:                # grouped/summarised — TRUNCATED unle
   groupMeta: {id, name, members[]},      # present ONLY on grouped entities; undocumented upstream
   visibilityScore, latestRank, avgRank, avgSentiment, appearances,
   citationCount, detectionRate, top3, validMetricsCount
+                                         # ⚠ visibilityScore / latestValue / detectionRate / top3 = LAST bucket (quirks §34);
+                                         #   appearances = window sum
 
 data.competitorTimeSeriesData:
   hourly, daily, weekly, monthly        # per-competitor time series — own brand NOT included
@@ -91,14 +95,16 @@ Example:
 curl -X POST https://rankscale.ai/v1/metrics/report \
   -H "Authorization: Bearer $RANKSCALE_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"brandId":"brand_abc123","isoStartDate":"2026-05-01","isoEndDate":"2026-06-01","aggregation":"daily","includeNotFoundExecutions":true}'
+  -d '{"brandId":"brand_abc123","isoStartDate":"2026-05-01","isoEndDate":"2026-05-30","aggregation":"monthly","includeNotFoundExecutions":true}'
 ```
 
-(Uses ISO dates, not a `timeFrame` preset — see quirks §27.)
+(Uses ISO dates, not a `timeFrame` preset — see quirks §27. `isoEndDate` is exclusive, so `2026-05-30` covers all of May — quirks §1b. `monthly` returns one bucket, so the top-level values are May's — quirks §34. For a chart series, repeat the call with `"aggregation":"daily"` and read only `historicalData.daily`.)
 
 ### POST `/v1/metrics/search-terms-report` — per-search-term snapshots
 
 Same shared filters. Supports `includeAnswerTexts: true` to include the raw AI answer text for each execution — a **much** heavier payload (~8.5 MB over a 3-month window for 63 terms / 2,065 executions); always `-o` to a file.
+
+**Verify the window in the data, not just in the echo.** For windows that ended in the past, this endpoint has echoed the custom window in `requestedDateRange` while returning per-term data from other dates (quirks §35). Check that `firstSeen`/`lastSeen` and `answerTexts[].executedAt` fall inside the window before using the response.
 
 **No brand grouping.** Unlike `/report`'s grouped `competitorMetrics[]`, this endpoint returns **raw per-execution brand detections** with no entity consolidation — normalise and group names yourself before matching against `/report` output (quirks §29). `includeNotFoundExecutions` is a `/report`-only field and is ignored here (lands in `warnings[]`).
 
@@ -198,7 +204,7 @@ All four reporting endpoints accept the same time-window and filter fields.
 - `isoStartDate` + `isoEndDate`: custom range (paired). **Prefer this for everything user-facing** — presets return different numbers for the same span (quirks §27). Overrides `timeFrame`/`periodOffset`. `isoEndDate` is exclusive (quirks §1b).
 - `timeFrame`: preset window. `24h | 7d | 30d | 3m | 1y`. Probe use only — see quirks §27.
 - `periodOffset`: integer, moves the preset N periods into the past. Tied to presets, so avoid it; use an explicit ISO window instead.
-- `aggregation`: `hourly | daily | weekly | monthly`
+- `aggregation`: `hourly | daily | weekly | monthly`. On `/report`, top-level rates are the last bucket's values; request one bucket per period for window figures (quirks §34).
 - `userTimezone`: IANA tz string
 
 **Filters** (AND across fields, OR within arrays):

@@ -28,6 +28,18 @@ If the pull fails — offline, local uncommitted edits, or a diverged history �
 - **Tools available**: `curl` for requests. For JSON parsing, use whatever the environment provides — `node -e "..."`, `jq`, or `python -m json.tool`. Check what's on PATH before assuming; don't hard-depend on any one of them. The bulk-run script (`scripts/bulk_run.js`, recipe §8) needs Node 18+.
 - **Shell syntax**: examples below use bash-style variable expansion (`$RANKSCALE_API_KEY`). On Windows PowerShell that becomes `$env:RANKSCALE_API_KEY`. Pick whichever shell tool you call — both work, but mind the syntax.
 
+## ⚠ Before you report any number for a period — read this
+
+**On `/report`, top-level rate metrics are the LAST bucket of your `aggregation`, not the window.** `ownBrandMetrics.visibilityScore`, `detectionRate`, `top3`, `avgPosition`, `sentiment`, every `competitorMetrics[]` rate, and the same fields on every engine/topic/query-filtered call describe only the final bucket. Request a month with `aggregation: "daily"` and you get the last day's numbers labelled as the month's. `trends` is last bucket minus the previous bucket, not a period-over-period change. Counts (`mentions`, `citations`, `executionsAnalyzed`, `appearances`) are fine: they are window sums. Full evidence: quirks §34.
+
+What to do, every time:
+1. **For figures that describe a period** — one call per period with **exactly one bucket**: a calendar-month window + `aggregation: "monthly"`. Check `historicalData.monthly.timestamps.length === 1` before reading any top-level rate.
+2. **For trend charts** — a **separate** `aggregation: "daily"` call; use only its bucket arrays, never its top-level values.
+3. **For a non-calendar window (own brand only)** — compute `Σ(rate[i] × executionsAnalyzed[i]) / Σ executionsAnalyzed[i]` over the daily buckets.
+4. **Never** quote `trends` as "change vs. previous period".
+
+This trap shipped wrong per-engine and per-topic numbers in a real client report (one engine read 72.1 instead of 46.9). It hides well, because the overall figure can coincidentally match.
+
 ## Calling pattern
 
 Every endpoint returns `{success: true, data: {...}}` on success, or `{success: false, error: {code, message, details}}` on failure. Always check `.success` before reading `.data`.
@@ -112,17 +124,22 @@ Most reporting endpoints need a `brandId`. When the user names a brand ("show me
 
 ### 2. Pull metrics for a brand over a window
 
-The user almost always asks for a time window. **Always express it with `isoStartDate` + `isoEndDate` (paired ISO date strings) — never a `timeFrame` preset.** A preset and the ISO dates covering the same span return *different* aggregates and even different competitor sets; only the ISO form matches the dashboard (quirks §27). Convert the user's window to explicit dates first, remembering that `isoEndDate` is exclusive (quirks §1b). Pair the dates with `aggregation` (`hourly`, `daily`, `weekly`, or `monthly`) for the bucket size. Both date keys are camelCase-strict — the API silently drops any other spelling into `warnings[]` (quirks §1). The presets (`24h`, `7d`, `30d`, `3m`, `1y`) still exist; use them only for a throwaway "is there any data" probe, never for numbers a user will see.
+The user almost always asks for a time window. **Always express it with `isoStartDate` + `isoEndDate` (paired ISO date strings) — never a `timeFrame` preset.** A preset and the ISO dates covering the same span return *different* aggregates and even different competitor sets; only the ISO form matches the dashboard (quirks §27). Convert the user's window to explicit dates first, remembering that `isoEndDate` is exclusive (quirks §1b). Pair the dates with `aggregation` (`hourly`, `daily`, `weekly`, or `monthly`) for the bucket size. **`aggregation` decides what the top-level numbers mean: they are the last bucket's (quirks §34).** So make two calls: one with a single bucket covering the window (calendar month → `"monthly"`) for the headline figures, and one `"daily"` call for the series. Both date keys are camelCase-strict — the API silently drops any other spelling into `warnings[]` (quirks §1). The presets (`24h`, `7d`, `30d`, `3m`, `1y`) still exist; use them only for a throwaway "is there any data" probe, never for numbers a user will see.
 
-```json
+```jsonc
+// Call A — headline figures for May 2026 (one bucket; isoEndDate is exclusive, quirks §1b)
 {
   "brandId": "<id>",
   "isoStartDate": "2026-05-01",
-  "isoEndDate": "2026-06-01",
-  "aggregation": "daily",
+  "isoEndDate": "2026-05-30",
+  "aggregation": "monthly",
   "includeNotFoundExecutions": true
 }
+// Call B — same window, daily series for charts only (ignore its top-level values)
+{ "brandId": "<id>", "isoStartDate": "2026-05-01", "isoEndDate": "2026-05-30", "aggregation": "daily", "includeNotFoundExecutions": true }
 ```
+
+Check the returned span before trusting the request: `historicalData.monthly.timestamps` must hold exactly one timestamp (the 1st of the month); the daily call's first and last timestamps must be the 1st and last day of the month.
 
 Optional reporting filters (all accept a single string, an array for OR-within-field, or `"all"` for no filter; filters combine with AND across fields):
 - `selectedTopic` — topic ID, topic name, `_orphaned`, or array
@@ -145,9 +162,9 @@ Two bucket-array traps:
 - `brandNotFound[]` is a **non-signal** — it reads `true` for essentially any brand with sub-100% detection. Use `detectionRate` instead and never report "brand not found" off the flag (quirks §2).
 - **The last ~3 buckets of `citations[]` and `sources[]` are window-dependent, not real** — `citations` under-counts there and `sources` populates *only* there. Drop them, and never plot `sources` daily at all. `visibilityScore`, `mentions`, and `detectionRate` are window-stable to the edge (quirks §26).
 
-Present a metrics table with these columns: Date, Visibility, Sentiment, Mentions, Citations, Avg Position, Detection %, Top-3 %. Above it, show the snapshot summary (current snapshot values from `ownBrandMetrics` + the `trends` delta).
+Present a metrics table with these columns: Date, Visibility, Sentiment, Mentions, Citations, Avg Position, Detection %, Top-3 %. Above it, show the window summary from the **one-bucket** call (Call A). Don't show `trends` as a period change: it is the last bucket minus the previous one (quirks §5).
 
-**Brand Rank (by Visibility) — vs. competitors.** Compute this from `data.competitorMetrics[]` (which includes the own brand, flagged `isOwnBrand: true`): rank = `1 + (count of entries with strictly greater visibilityScore)` — ties don't push the brand down. This reproduces the dashboard's rank. The response also carries `latestRank`/`avgRank` per entry — **these are not ranks.** Verified 2026-08-07: they return non-integer values (`latestRank: 2.7`, `avgRank: 2.9`) for a brand whose computed rank was 1, so they track something position-like, not an ordinal. Ignore them. The MCP's equivalent `own_brand_rank` is likewise always `1` (a display pin). The visibility-sorted computation above is the method that matched the dashboard in testing. The shared filters (`selectedEngine`, `selectedTopic`, `selectedTags`, `selectedQuery`) work per-cut, so you can rank within a single engine, topic, tag, or query by re-running filtered. Note `competitorMetrics` entries may carry a different `validMetricsCount` than the own brand (competitor baselines use a wider window) — the ordering still matches the UI. **Full recipe — including daily rank over time and its caveats — in recipe §6 below.**
+**Brand Rank (by Visibility) — vs. competitors.** Compute this from `data.competitorMetrics[]` of a **one-bucket** call (its `visibilityScore` is the last bucket's, quirks §34), which includes the own brand, flagged `isOwnBrand: true`: rank = `1 + (count of entries with strictly greater visibilityScore)` — ties don't push the brand down. This reproduces the dashboard's rank. The response also carries `latestRank`/`avgRank` per entry — **these are not ranks.** Verified 2026-08-07: they return non-integer values (`latestRank: 2.7`, `avgRank: 2.9`) for a brand whose computed rank was 1, so they track something position-like, not an ordinal. Ignore them. The MCP's equivalent `own_brand_rank` is likewise always `1` (a display pin). The visibility-sorted computation above is the method that matched the dashboard in testing. The shared filters (`selectedEngine`, `selectedTopic`, `selectedTags`, `selectedQuery`) work per-cut, so you can rank within a single engine, topic, tag, or query by re-running filtered. Note `competitorMetrics` entries may carry a different `validMetricsCount` than the own brand (competitor baselines use a wider window) — the ordering still matches the UI. **Full recipe — including daily rank over time and its caveats — in recipe §6 below.**
 
 ### 3. Citation analytics
 
@@ -182,7 +199,7 @@ The response may carry two runway views: `runway` (detailed simulation, bounded 
 **Definition.** The own brand's position among all brands detected for a given cut, sorted by `visibilityScore` descending. **Rank 1 = highest visibility (best).** Reproduces the dashboard's rank. Always compute it from visibility — don't trust ready-made rank fields (see recipe §2 note).
 
 **Aggregate (window-level) rank:**
-1. `POST /report` for the cut you want (add `selectedTopic` / `selectedEngine` / `selectedQuery` to rank within a topic, engine, or query).
+1. `POST /report` for the cut you want (add `selectedTopic` / `selectedEngine` / `selectedQuery` to rank within a topic, engine, or query), with an `aggregation` that returns **exactly one bucket** for the window (`"monthly"` for a calendar month). With more buckets, the rank is the rank on the last day or week (quirks §34).
 2. From `data.competitorMetrics[]` (own brand included, `isOwnBrand: true`): rank = `1 + (count of entries whose visibilityScore is strictly greater than the own brand's)`. Strict-greater means ties don't demote the brand.
 3. Report the pool size = `competitorMetrics.length` next to the rank (e.g. "rank 3 of 50").
 
@@ -196,8 +213,8 @@ The response may carry two runway views: `runway` (detailed simulation, bounded 
 
 **Caveats — state these when reporting:**
 - **The unfiltered pool is truncated.** An unfiltered `/report` returns a summarised `competitorMetrics[]` (a couple of dozen entries), not the full detected roster. Filtering by a single `selectedQuery` returns far more (quirk 28). So a pool size taken from one unfiltered call is a floor — call the rank "of the summarised set" unless you unioned per-query results.
-- **Aggregate ≠ average of daily.** The aggregate rank is period-weighted share-of-voice, so a brand can be aggregate rank 1 yet daily rank 2 on most days (quirk 17). Don't reconcile them.
-- **~2-week competitor backfill.** `competitorTimeSeriesData` only carries competitor values for roughly the trailing ~2 weeks of the window — earlier buckets are 0 for every competitor, so daily ranks there are spurious rank-1s (quirk 16b). Null-out (don't zero) those older values and caption the truncation; window aggregates stay valid.
+- **A one-bucket window rank and daily ranks can differ legitimately**, because daily values scatter around the window value. If the "window" rank simply equals the rank on the last day, you made a multi-bucket request (quirks §17, §34) — re-pull with one bucket.
+- **~2-week competitor backfill.** `competitorTimeSeriesData` only carries competitor values for roughly the trailing ~2 weeks of the window — earlier buckets are 0 for every competitor, so daily ranks there are spurious rank-1s (quirk 16b). Null-out (don't zero) those older values and caption the truncation. One-bucket `competitorMetrics[]` per period stays valid (quirks §34).
 - **Low-visibility lower bound.** `competitorTimeSeriesData` carries a smaller competitor set (~25–35) than the full detected pool in `competitorMetrics` (dozens). For a deep long-tail brand the daily rank is a *lower bound* — a competitor absent from the series could outrank it on a given day. Flag it.
 - **Cross-surface note.** If computing this via the Rankscale MCP instead of the API, ignore its `own_brand_rank` field — it is always `1` (a display pin), not a ranking.
 - **Topic-filtered pools use a different base per brand** (quirks §32), and filtered `competitorMetrics[]` caps at about 100 entries (quirks §28). For a short snapshot or a like-for-like topic ranking, recompute from `/search-terms-report` instead (§9).
@@ -208,6 +225,7 @@ The response may carry two runway views: `runway` (detailed simulation, bounded 
 The most common reporting ask, and the one where traps compound. Run this checklist.
 
 **Getting comparable windows:**
+0. **One call per month with `aggregation: "monthly"`, and assert exactly one bucket.** This applies to the unfiltered call and to every engine, topic, and query cut. Never take a month's visibility, detection, top-3, position, sentiment, or competitor rank from a `daily` or `weekly` call: those top-level values are the last day's or week's (quirks §34). Never use `trends` as the MoM delta (quirks §5); subtract the two one-bucket values yourself. Pull daily separately for charts.
 1. Use explicit `isoStartDate`/`isoEndDate` per month, not `timeFrame` + `periodOffset` — calendar months aren't 30 days.
 2. **Compensate the exclusive end date** (quirks §1b): for July pass `2026-07-01` → `2026-07-30`. On `/report` you can instead slice client-side; on `/citations` you cannot, so compensating is the only option.
 3. **Verify the returned span before comparing anything.** On `/report` read the sliced `timestamps[]`; on `/citations` read `firstSeenAt`/`lastSeenAt`. Drop any bucket outside the intended month.
@@ -216,9 +234,9 @@ The most common reporting ask, and the one where traps compound. Run this checkl
 **Interpreting the deltas:**
 5. **Compare against the pool, not just the prior value.** A brand's citations rising 18% while the total citation pool rose 12.5% is a ~5.5pp real gain, not an 18% one. Always pull `data.totalCitations` for both months and report **share** alongside the raw delta.
 6. **Normalise competitor names before matching** and inspect every ENTERED/EXITED entity for merges and renames (quirks §24). The biggest apparent mover is the most likely artifact.
-7. **Cross-check the aggregate against the daily series.** They can disagree in direction (quirks §17) — `avgPosition` did exactly that in testing. When they disagree, say so and call the metric flat rather than picking whichever supports the story.
+7. **Cross-check the one-bucket value against the daily series.** It should equal the `executionsAnalyzed`-weighted mean of the daily buckets to about 0.1. If it equals the last daily bucket instead, the call returned more than one bucket — fix that before going on (quirks §17, §34).
 7b. **Discard the last ~3 buckets of any `citations`/`sources` series before comparing** — they're window artifacts and will fake a month-end decline (quirks §26). Keeping the two months' window geometry identical makes the effect cancel; say that you did.
-8. **Use `engineMetricsData` and `topicMetricsData`, not just the headline.** A flat window aggregate routinely hides double-digit swings in opposite directions across engines and topics — that's usually the actual finding.
+8. **Break the headline down by engine and topic.** A flat window aggregate routinely hides double-digit swings in opposite directions across engines and topics — that's usually the actual finding. For monthly per-engine and per-topic values, run one `selectedEngine` / `selectedTopic` call per cut with `aggregation: "monthly"`. Use `engineMetricsData` / `topicMetricsData` from the daily call only for the series.
 9. **Cross-reference citations against visibility per engine.** They can move in *opposite* directions on the same engine (observed: ChatGPT visibility −5.1 while owned-domain citations +120%; Gemini 3.0 Flash visibility +11.8 while citations −36%). Visibility measures mention share; citations measure whether the brand's own site was the source. A visibility gain with a citation drop means the engine is discussing the brand while sourcing third parties — a materially weaker win, and worth flagging as such.
 
 ### 8. Run search terms now — once, or every term N times
@@ -247,7 +265,7 @@ node <skill-folder>/scripts/bulk_run.js --brand "<name or id>" --topic "<name or
 
 Use this after a bulk run (§8), or whenever brands in a topic must be compared on one common base. Topic-level `/report` aggregates give each brand its own denominator (quirks §32), so compute from the per-term data instead:
 
-1. `POST /v1/metrics/search-terms-report` with `selectedTopic`, an ISO window that covers the runs (its end date is inclusive, endpoints.md), and `includeAnswerTexts: true`. Write it to a file: 36 terms × 20 runs came to about 1.8 MB.
+1. `POST /v1/metrics/search-terms-report` with `selectedTopic`, an ISO window that covers the runs (its end date is inclusive, endpoints.md), and `includeAnswerTexts: true`. Write it to a file: 36 terms × 20 runs came to about 1.8 MB. **Then check that every `answerTexts[].executedAt` and every `firstSeen`/`lastSeen` falls inside the window.** For windows that ended in the past, this endpoint has returned data from other dates (quirks §35). If the check fails, don't use the response.
 2. Map each term to its prompt and engine (`query`, `aiSearchEngines[0]`); runs per term = `answerTexts.length`.
 3. Normalise and merge brand names across terms (quirks §24, §33), then classify non-agency entities (software, directories, marketplaces).
 4. Per brand and slice (overall, prompt, engine, tag), sum `appearances` and `appearances × avgRank`, then divide by the slice's total executions:
@@ -299,5 +317,6 @@ Send `X-Request-Id` (any string you choose) when you want a correlation ID echoe
 - **Round metric numbers to 1 decimal** unless the user asks for raw values.
 - **Convert timestamps** to plain dates (YYYY-MM-DD) in user-facing output.
 - **Reference the saved JSON file** in your response (e.g., "Full data in [Rankscale/acme_report.json](Rankscale/acme_report.json)") so the user can ask follow-ups against it.
+- **Every period figure comes from a one-bucket call.** Before writing a visibility, detection, top-3, position, sentiment, or rank value for a period, confirm the response it came from had exactly one bucket (quirks §34). Say in the report's method note which `aggregation` you used.
 - **Do not report `brandNotFound` as a finding.** It reads `true` for almost every brand and means nothing on its own; cite `detectionRate` instead (quirks §2).
 - **State the caveat next to the number, not in a footnote.** Most of the traps in quirks.md change what a figure *means* rather than invalidating it — a reader who sees "+18%" without "the whole pool grew 12.5%" has been misled even though the number is right.
